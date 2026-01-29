@@ -24,6 +24,17 @@ RUN set -eux; \
     chmod +x /usr/local/bin/grpcurl; \
     /usr/local/bin/grpcurl -version
 
+
+# --- Xray proto (нужно для grpcurl без reflection) ---
+ARG XRAY_PROTO_REF=main
+
+RUN set -eux; \
+    mkdir -p /srv/proto; \
+    curl -fsSL "https://github.com/XTLS/Xray-core/archive/refs/heads/${XRAY_PROTO_REF}.tar.gz" \
+      | tar -xz --strip-components=1 -C /srv/proto
+
+
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

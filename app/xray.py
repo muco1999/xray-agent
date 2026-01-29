@@ -9,18 +9,29 @@ GET_SYS_STATS_METHOD = "xray.app.stats.command.StatsService.GetSysStats"
 
 
 def grpcurl_call(method: str, payload: Optional[Dict[str, Any]] = None, timeout: int = 20) -> Dict[str, Any]:
-    """
-    Call Xray gRPC API via grpcurl and return parsed JSON (or raw output).
-    Works in containers (no systemctl needed).
-    """
-    cmd = ["grpcurl", "-plaintext"]
+    # method приходит как полный: xray.app.stats.command.StatsService.GetSysStats
+    # Выберем proto в зависимости от сервиса
+    if method.startswith("xray.app.stats.command.StatsService."):
+        proto_file = "xray/app/stats/command/command.proto"
+    elif method.startswith("xray.app.proxyman.command.HandlerService."):
+        proto_file = "xray/app/proxyman/command/command.proto"
+    else:
+        raise RuntimeError(f"Unknown method for proto mapping: {method}")
+
+    cmd = [
+        "grpcurl",
+        "-plaintext",
+        "-import-path", "/srv/proto",          # путь внутри контейнера (WORKDIR=/srv)
+        "-proto", proto_file,
+    ]
+
     if payload is not None:
         cmd += ["-d", json.dumps(payload)]
+
     cmd += [settings.xray_api_addr, method]
 
     res = run_cmd(cmd, timeout=timeout)
     if res["rc"] != 0:
-        # важный момент: бросаем понятную ошибку (для FastAPI 500 detail)
         raise RuntimeError(f"grpcurl failed: {res}")
 
     out = res["stdout"]

@@ -24,4 +24,4 @@ API_PORT="$(grep -E '^API_BIND_PORT=' .env | tail -n1 | cut -d= -f2-)"
 
 echo ""
 echo "[TEST]"
-echo "curl -s -H \"Authorization: Bearer ${API_TOKEN}\" http://${API_HOST}:${API_PORT}/health/full | jq"
+echo "curl -s -H \"Authorization: Bearer ${API_TOKEN}\" http://${API_HOST}:${AP ййфI_PORT}/health/full | jq"
