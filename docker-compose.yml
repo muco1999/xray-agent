@@ -1,0 +1,35 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: xray-agent-redis
+    restart: unless-stopped
+    network_mode: "host"
+    env_file:
+      - .env
+    command: ["redis-server", "--port", "${REDIS_PORT}", "--save", "", "--appendonly", "no"]
+
+  xray-agent-api:
+    build: .
+    container_name: xray-agent-api
+    restart: unless-stopped
+    network_mode: "host"
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    command: ["uvicorn", "app.main:app", "--host", "${API_BIND_HOST}", "--port", "${API_BIND_PORT}"]
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+
+  xray-agent-worker:
+    build: .
+    container_name: xray-agent-worker
+    restart: unless-stopped
+    network_mode: "host"
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    command: ["python", "worker.py"]
+    volumes:
+      - /etc/localtime:/etc/localtime:ro

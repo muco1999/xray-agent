@@ -1,0 +1,72 @@
+# ----------------------
+# Secrets / runtime
+# ----------------------
+.env
+.env.*
+*.key
+*.pem
+*.crt
+secrets/
+tokens/
+
+# ----------------------
+# Python
+# ----------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.cache/
+
+# Virtualenv
+.venv/
+venv/
+ENV/
+
+# ----------------------
+# IDE
+# ----------------------
+.idea/
+.vscode/
+*.iml
+
+# ----------------------
+# OS
+# ----------------------
+.DS_Store
+Thumbs.db
+
+# ----------------------
+# Logs
+# ----------------------
+*.log
+logs/
+
+# ----------------------
+# Docker
+# ----------------------
+docker-compose.override.yml
+*.pid
+
+# ----------------------
+# Runtime data
+# ----------------------
+data/
+redis-data/
+tmp/
+run/
+
+# ----------------------
+# Coverage / reports
+# ----------------------
+htmlcov/
+.coverage
+coverage.xml
