@@ -5,9 +5,9 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /srv
 
-# базовые пакеты
+# базовые пакеты (нужны только для grpcurl)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates bash tar protobuf-compiler findutils \
+    curl ca-certificates bash tar \
     && rm -rf /var/lib/apt/lists/*
 
 # grpcurl (amd64/arm64) через официальный tar.gz релиз
@@ -22,29 +22,20 @@ RUN set -eux; \
     curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v${VERSION}/grpcurl_${VERSION}_linux_${GRPCURL_ARCH}.tar.gz" \
       | tar -xz -C /usr/local/bin grpcurl; \
     chmod +x /usr/local/bin/grpcurl; \
-    /usr/local/bin/grpcurl -version
+    grpcurl -version
 
-# --- Xray proto (нужно для grpcurl без reflection) ---
-ARG XRAY_PROTO_REF=main
-RUN set -eux; \
-    mkdir -p /srv/proto; \
-    curl -fsSL "https://github.com/XTLS/Xray-core/archive/refs/heads/${XRAY_PROTO_REF}.tar.gz" \
-      | tar -xz --strip-components=1 -C /srv/proto
+COPY requirements.txt /srv/requirements.txt
+RUN pip install --no-cache-dir -r /srv/requirements.txt
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Твой код
+COPY app /srv/app
+COPY worker.py /srv/worker.py
 
-# generate python protobuf modules into /srv/gen
-RUN mkdir -p /srv/gen && \
-    python -m grpc_tools.protoc -I/srv/proto \
-      --python_out=/srv/gen \
-      --grpc_python_out=/srv/gen \
-      $(find /srv/proto -name "*.proto")
+# Сгенерённые proto-модули (в репозитории)
+COPY xrayproto /srv/xrayproto
 
-ENV PYTHONPATH="/srv/gen:${PYTHONPATH}"
-
-COPY app ./app
-COPY worker.py ./worker.py
+# Чтобы "import xrayproto...." работал
+ENV PYTHONPATH="/srv:${PYTHONPATH}"
 
 EXPOSE 8000
 

@@ -21,10 +21,6 @@ _runtime_version.ValidateProtobufRuntimeVersion(
 
 _sym_db = _symbol_database.Default()
 
-
-from app.observatory import config_pb2 as app_dot_observatory_dot_config__pb2
-
-
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n%app/observatory/command/command.proto\x12!xray.core.app.observatory.command\x1a\x1c\x61pp/observatory/config.proto\"\x1a\n\x18GetOutboundStatusRequest\"Y\n\x19GetOutboundStatusResponse\x12<\n\x06status\x18\x01 \x01(\x0b\x32,.xray.core.app.observatory.ObservationResult\"\x08\n\x06\x43onfig2\xa7\x01\n\x12ObservatoryService\x12\x90\x01\n\x11GetOutboundStatus\x12;.xray.core.app.observatory.command.GetOutboundStatusRequest\x1a<.xray.core.app.observatory.command.GetOutboundStatusResponse\"\x00\x42\x80\x01\n%com.xray.core.app.observatory.commandP\x01Z1github.com/xtls/xray-core/app/observatory/command\xaa\x02!Xray.Core.App.Observatory.Commandb\x06proto3')
 
 _globals = globals()

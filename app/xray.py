@@ -1,14 +1,3 @@
-import json
-from typing import Any, Dict, Optional
-
-from .config import settings
-from .utils import run_cmd, parse_hostport, is_tcp_open
-
-
-
-
-
-
 import base64
 import json
 from typing import Any, Dict, Optional
@@ -21,10 +10,11 @@ ALTER_INBOUND_METHOD = "xray.app.proxyman.command.HandlerService.AlterInbound"
 GET_SYS_STATS_METHOD = "xray.app.stats.command.StatsService.GetSysStats"
 
 # ---- proto modules generated in /srv/gen (PYTHONPATH set in Dockerfile) ----
-from common.serial import typed_message_pb2
-from common.protocol import user_pb2
-from app.proxyman.command import command_pb2 as proxyman_cmd_pb2
-from proxy.vless import account_pb2 as vless_account_pb2
+from xrayproto.common.serial import typed_message_pb2
+from xrayproto.common.protocol import user_pb2
+from xrayproto.app.proxyman.command import command_pb2 as proxyman_cmd_pb2
+from xrayproto.proxy.vless import account_pb2 as vless_account_pb2
+
 
 
 
