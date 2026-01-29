@@ -2,10 +2,10 @@ import time
 from fastapi import FastAPI, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from .auth import require_token
-from .config import settings
-from .queue import enqueue_job, get_job
-from .xray import xray_runtime_status, add_client, remove_client
+from app.auth import require_token
+from app.config import settings
+from app.queue import enqueue_job, get_job
+from app.xray import xray_runtime_status, add_client, remove_client
 
 app = FastAPI(title="Xray Manager API", version="0.3.0")
 

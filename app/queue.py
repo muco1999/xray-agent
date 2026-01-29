@@ -6,7 +6,7 @@ from typing import Any, Dict
 import redis
 from fastapi import HTTPException
 
-from .config import settings
+from app.config import settings
 
 QUEUE_KEY = "xray_jobs_queue"
 JOB_KEY_PREFIX = "xray_job:"

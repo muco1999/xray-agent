@@ -1,7 +1,7 @@
 from typing import Optional
 from fastapi import Header, HTTPException
 
-from .config import settings
+from app.config import settings
 
 def require_token(authorization: Optional[str] = Header(default=None)) -> None:
     """
