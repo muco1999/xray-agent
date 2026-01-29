@@ -12,9 +12,9 @@ def grpcurl_call(method: str, payload: Optional[Dict[str, Any]] = None, timeout:
     # method приходит как полный: xray.app.stats.command.StatsService.GetSysStats
     # Выберем proto в зависимости от сервиса
     if method.startswith("xray.app.stats.command.StatsService."):
-        proto_file = "xray/app/stats/command/command.proto"
+        proto_file = "app/stats/command/command.proto"
     elif method.startswith("xray.app.proxyman.command.HandlerService."):
-        proto_file = "xray/app/proxyman/command/command.proto"
+        proto_file = "app/proxyman/command/command.proto"
     else:
         raise RuntimeError(f"Unknown method for proto mapping: {method}")
 
