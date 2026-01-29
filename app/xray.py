@@ -21,10 +21,11 @@ ALTER_INBOUND_METHOD = "xray.app.proxyman.command.HandlerService.AlterInbound"
 GET_SYS_STATS_METHOD = "xray.app.stats.command.StatsService.GetSysStats"
 
 # ---- proto modules generated in /srv/gen (PYTHONPATH set in Dockerfile) ----
-from xray.common.serial import typed_message_pb2
-from xray.common.protocol import user_pb2
-from xray.app.proxyman.command import command_pb2 as proxyman_cmd_pb2
-from xray.proxy.vless import account_pb2 as vless_account_pb2
+from common.serial import typed_message_pb2
+from common.protocol import user_pb2
+from app.proxyman.command import command_pb2 as proxyman_cmd_pb2
+from proxy.vless import account_pb2 as vless_account_pb2
+
 
 
 def _typed_message(type_name: str, msg_bytes: bytes) -> Dict[str, Any]:
