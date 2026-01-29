@@ -4,13 +4,74 @@ from typing import Any, Dict, Optional
 from .config import settings
 from .utils import run_cmd, parse_hostport, is_tcp_open
 
+
+
+
+
+
+import base64
+import json
+from typing import Any, Dict, Optional
+
+from .config import settings
+from .utils import run_cmd, parse_hostport, is_tcp_open
+
+# grpc methods
 ALTER_INBOUND_METHOD = "xray.app.proxyman.command.HandlerService.AlterInbound"
 GET_SYS_STATS_METHOD = "xray.app.stats.command.StatsService.GetSysStats"
 
+# ---- proto modules generated in /srv/gen (PYTHONPATH set in Dockerfile) ----
+from xray.common.serial import typed_message_pb2
+from xray.common.protocol import user_pb2
+from xray.app.proxyman.command import command_pb2 as proxyman_cmd_pb2
+from xray.proxy.vless import account_pb2 as vless_account_pb2
+
+
+def _typed_message(type_name: str, msg_bytes: bytes) -> Dict[str, Any]:
+    # grpcurl expects bytes fields as base64 in JSON
+    return {"type": type_name, "value": base64.b64encode(msg_bytes).decode("ascii")}
+
+
+def _build_vless_account_typed(uuid: str, flow: str) -> Dict[str, Any]:
+    acc = vless_account_pb2.Account(id=uuid, flow=flow or "")
+    return _typed_message("xray.proxy.vless.Account", acc.SerializeToString())
+
+
+def _build_add_user_operation_typed(uuid: str, email: str, level: int, flow: str) -> Dict[str, Any]:
+    # User.account is TypedMessage (bytes), so we must build it
+    account_tm = _build_vless_account_typed(uuid, flow)
+
+    user = user_pb2.User(
+        level=level,
+        email=email,
+        account=typed_message_pb2.TypedMessage(
+            type=account_tm["type"],
+            value=base64.b64decode(account_tm["value"]),
+        ),
+    )
+
+    inbound_op = proxyman_cmd_pb2.InboundOperation(
+        add=proxyman_cmd_pb2.AddUserOperation(user=user)
+    )
+
+    return _typed_message(
+        "xray.app.proxyman.command.InboundOperation",
+        inbound_op.SerializeToString(),
+    )
+
+
+def _build_remove_user_operation_typed(email: str) -> Dict[str, Any]:
+    inbound_op = proxyman_cmd_pb2.InboundOperation(
+        remove=proxyman_cmd_pb2.RemoveUserOperation(email=email)
+    )
+    return _typed_message(
+        "xray.app.proxyman.command.InboundOperation",
+        inbound_op.SerializeToString(),
+    )
+
 
 def grpcurl_call(method: str, payload: Optional[Dict[str, Any]] = None, timeout: int = 20) -> Dict[str, Any]:
-    # method приходит как полный: xray.app.stats.command.StatsService.GetSysStats
-    # Выберем proto в зависимости от сервиса
+    # proto mapping
     if method.startswith("xray.app.stats.command.StatsService."):
         proto_file = "app/stats/command/command.proto"
     elif method.startswith("xray.app.proxyman.command.HandlerService."):
@@ -21,8 +82,10 @@ def grpcurl_call(method: str, payload: Optional[Dict[str, Any]] = None, timeout:
     cmd = [
         "grpcurl",
         "-plaintext",
-        "-import-path", "/srv/proto",          # путь внутри контейнера (WORKDIR=/srv)
-        "-proto", proto_file,
+        "-import-path",
+        "/srv/proto",
+        "-proto",
+        proto_file,
     ]
 
     if payload is not None:
@@ -49,11 +112,6 @@ def xray_api_sys_stats() -> Dict[str, Any]:
 
 
 def xray_runtime_status() -> Dict[str, Any]:
-    """
-    Container-friendly status:
-    - checks TCP port open for Xray API
-    - calls GetSysStats (gRPC) if port is open
-    """
     host, port = parse_hostport(settings.xray_api_addr)
     port_open = is_tcp_open(host, port)
 
@@ -62,7 +120,6 @@ def xray_runtime_status() -> Dict[str, Any]:
         "xray_api_port_open": port_open,
     }
 
-    # grpcurl presence (helpful for debugging)
     grpcurl_present = run_cmd(["bash", "-lc", "command -v grpcurl"], timeout=10)
     status["grpcurl_present"] = {"rc": grpcurl_present["rc"], "path": grpcurl_present["stdout"]}
 
@@ -87,21 +144,24 @@ def xray_runtime_status() -> Dict[str, Any]:
 
 
 def add_client(uuid: str, email: str, inbound_tag: str, level: int = 0, flow: str = "") -> Dict[str, Any]:
+    op_tm = _build_add_user_operation_typed(uuid=uuid, email=email, level=level, flow=flow)
+
     payload = {
         "tag": inbound_tag,
-        "operation": {
-            "add": {
-                "user": {
-                    "level": level,
-                    "email": email,
-                    "account": {"id": uuid, "flow": flow},
-                }
-            }
-        },
+        "operation": op_tm,  # TypedMessage
     }
     return grpcurl_call(ALTER_INBOUND_METHOD, payload)
 
 
 def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
-    payload = {"tag": inbound_tag, "operation": {"remove": {"email": email}}}
+    op_tm = _build_remove_user_operation_typed(email=email)
+
+    payload = {
+        "tag": inbound_tag,
+        "operation": op_tm,  # TypedMessage
+    }
     return grpcurl_call(ALTER_INBOUND_METHOD, payload)
+
+
+
+

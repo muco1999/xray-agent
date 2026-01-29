@@ -7,7 +7,7 @@ WORKDIR /srv
 
 # базовые пакеты
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates bash tar \
+    curl ca-certificates bash tar protobuf-compiler findutils \
     && rm -rf /var/lib/apt/lists/*
 
 # grpcurl (amd64/arm64) через официальный tar.gz релиз
@@ -24,24 +24,28 @@ RUN set -eux; \
     chmod +x /usr/local/bin/grpcurl; \
     /usr/local/bin/grpcurl -version
 
-
 # --- Xray proto (нужно для grpcurl без reflection) ---
 ARG XRAY_PROTO_REF=main
-
 RUN set -eux; \
     mkdir -p /srv/proto; \
     curl -fsSL "https://github.com/XTLS/Xray-core/archive/refs/heads/${XRAY_PROTO_REF}.tar.gz" \
       | tar -xz --strip-components=1 -C /srv/proto
 
-
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# generate python protobuf modules into /srv/gen
+RUN mkdir -p /srv/gen && \
+    python -m grpc_tools.protoc -I/srv/proto \
+      --python_out=/srv/gen \
+      --grpc_python_out=/srv/gen \
+      $(find /srv/proto -name "*.proto")
+
+ENV PYTHONPATH="/srv/gen:${PYTHONPATH}"
 
 COPY app ./app
 COPY worker.py ./worker.py
 
 EXPOSE 8000
 
-# Надёжный запуск (uvicorn из python env)
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
