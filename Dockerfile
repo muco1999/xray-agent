@@ -5,22 +5,32 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /srv
 
-RUN apt-get update && apt-get install -y \
-    curl ca-certificates bash \
+# базовые пакеты
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates bash tar \
     && rm -rf /var/lib/apt/lists/*
 
-# grpcurl static binary
-RUN curl -L https://github.com/fullstorydev/grpcurl/releases/latest/download/grpcurl_linux_x86_64 \
-    -o /usr/local/bin/grpcurl \
-    && chmod +x /usr/local/bin/grpcurl
+# grpcurl (amd64/arm64) через официальный tar.gz релиз
+RUN set -eux; \
+    ARCH="$(dpkg --print-architecture)"; \
+    case "$ARCH" in \
+      amd64) GRPCURL_ARCH="x86_64" ;; \
+      arm64) GRPCURL_ARCH="arm64" ;; \
+      *) echo "Unsupported arch: $ARCH"; exit 1 ;; \
+    esac; \
+    VERSION="1.9.3"; \
+    curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v${VERSION}/grpcurl_${VERSION}_linux_${GRPCURL_ARCH}.tar.gz" \
+      | tar -xz -C /usr/local/bin grpcurl; \
+    chmod +x /usr/local/bin/grpcurl; \
+    /usr/local/bin/grpcurl -version
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# копируем новый пакет app/ и worker.py
 COPY app ./app
 COPY worker.py ./worker.py
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
+# Надёжный запуск (uvicorn из python env)
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000"]
