@@ -5,12 +5,10 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /srv
 
-# базовые пакеты (нужны только для grpcurl)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates bash tar \
     && rm -rf /var/lib/apt/lists/*
 
-# grpcurl (amd64/arm64) через официальный tar.gz релиз
 RUN set -eux; \
     ARCH="$(dpkg --print-architecture)"; \
     case "$ARCH" in \
@@ -27,16 +25,19 @@ RUN set -eux; \
 COPY requirements.txt /srv/requirements.txt
 RUN pip install --no-cache-dir -r /srv/requirements.txt
 
-# Твой код
+ARG XRAY_PROTO_REF=main
+RUN set -eux; \
+    mkdir -p /srv/proto; \
+    curl -fsSL "https://github.com/XTLS/Xray-core/archive/refs/heads/${XRAY_PROTO_REF}.tar.gz" \
+      | tar -xz --strip-components=1 -C /srv/proto
+
+RUN test -f /srv/proto/app/stats/command/command.proto && test -f /srv/proto/app/proxyman/command/command.proto
+
 COPY app /srv/app
 COPY worker.py /srv/worker.py
-
-# Сгенерённые proto-модули (в репозитории)
 COPY xrayproto /srv/xrayproto
 
-# Чтобы "import xrayproto...." работал
 ENV PYTHONPATH="/srv:${PYTHONPATH}"
 
 EXPOSE 8000
-
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
