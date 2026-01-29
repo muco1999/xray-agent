@@ -29,7 +29,6 @@ def _build_vless_account_typed(uuid: str, flow: str) -> Dict[str, Any]:
 
 
 def _build_add_user_operation_typed(uuid: str, email: str, level: int, flow: str) -> Dict[str, Any]:
-    # User.account is TypedMessage (bytes), so we must build it
     account_tm = _build_vless_account_typed(uuid, flow)
 
     user = user_pb2.User(
@@ -41,24 +40,22 @@ def _build_add_user_operation_typed(uuid: str, email: str, level: int, flow: str
         ),
     )
 
-    inbound_op = proxyman_cmd_pb2.InboundOperation(
-        add=proxyman_cmd_pb2.AddUserOperation(user=user)
-    )
+    op = proxyman_cmd_pb2.AddUserOperation(user=user)
 
     return _typed_message(
-        "xray.app.proxyman.command.InboundOperation",
-        inbound_op.SerializeToString(),
+        "xray.app.proxyman.command.AddUserOperation",
+        op.SerializeToString(),
     )
 
 
 def _build_remove_user_operation_typed(email: str) -> Dict[str, Any]:
-    inbound_op = proxyman_cmd_pb2.InboundOperation(
-        remove=proxyman_cmd_pb2.RemoveUserOperation(email=email)
-    )
+    op = proxyman_cmd_pb2.RemoveUserOperation(email=email)
+
     return _typed_message(
-        "xray.app.proxyman.command.InboundOperation",
-        inbound_op.SerializeToString(),
+        "xray.app.proxyman.command.RemoveUserOperation",
+        op.SerializeToString(),
     )
+
 
 
 def grpcurl_call(method: str, payload: Optional[Dict[str, Any]] = None, timeout: int = 20) -> Dict[str, Any]:
