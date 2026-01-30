@@ -2,14 +2,26 @@ import socket
 import subprocess
 from typing import Any, Dict, Tuple
 
+
 def run_cmd(cmd: list[str], timeout: int = 20) -> Dict[str, Any]:
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    return {
-        "cmd": cmd,
-        "rc": p.returncode,
-        "stdout": (p.stdout or "").strip(),
-        "stderr": (p.stderr or "").strip(),
-    }
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        return {
+            "cmd": cmd,
+            "rc": p.returncode,
+            "stdout": (p.stdout or "").strip(),
+            "stderr": (p.stderr or "").strip(),
+            "timeout": False,
+        }
+    except subprocess.TimeoutExpired as e:
+        return {
+            "cmd": cmd,
+            "rc": None,
+            "stdout": (getattr(e, "stdout", "") or "").strip(),
+            "stderr": (getattr(e, "stderr", "") or "").strip(),
+            "timeout": True,
+        }
+
 
 def is_tcp_open(host: str, port: int, timeout: float = 0.7) -> bool:
     try:
@@ -17,6 +29,7 @@ def is_tcp_open(host: str, port: int, timeout: float = 0.7) -> bool:
             return True
     except Exception:
         return False
+
 
 def parse_hostport(addr: str) -> Tuple[str, int]:
     if ":" not in addr:

@@ -1,31 +1,22 @@
 """
-Xray gRPC adapter (grpcio version).
+Xray gRPC adapter (grpcio version) — production hardened.
 
-Мы используем нативный gRPC клиент на Python (grpcio):
-- быстрее, чем grpcurl (нет fork/exec)
-- стабильнее под нагрузкой
-- нормальные таймауты и gRPC ошибки
+- sync grpcio client (fast, stable)
+- typed message operations for AlterInbound
+- no reflection; uses generated xrayproto.*
+- XRAY_MOCK=true enables mock mode
 
-Reflection не нужен: работаем с локально сгенерированными protobuf классами (xrayproto.*)
-
-AlterInbound требует TypedMessage:
-- operation: TypedMessage(AddUserOperation|RemoveUserOperation)
-- user.account: TypedMessage(xray.proxy.vless.Account)
-
-ВАЖНО по твоим proto:
-- RPC методы HandlerService.GetInboundUsers / GetInboundUsersCount в *_pb2_grpc.py
-  используют request_serializer = GetInboundUserRequest.SerializeToString.
-  Поэтому мы создаём GetInboundUserRequest(tag=..., email="") для list/count.
-
-XRAY_MOCK=true (env) включает локальный режим без реального Xray.
+Important:
+- This module is sync. Call from async code via threadpool/to_thread.
 """
 
 from __future__ import annotations
 
 import base64
 import os
+import threading
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import grpc
 from google.protobuf.json_format import MessageToDict
@@ -51,44 +42,83 @@ XRAY_MOCK = os.getenv("XRAY_MOCK", "").lower() in ("1", "true", "yes")
 
 
 # -----------------------------
-# Protobuf -> dict (совместимость protobuf/json_format)
+# Errors
 # -----------------------------
-def _pb_to_dict(msg) -> dict:
-    """
-    Protobuf -> dict с совместимостью между версиями protobuf.
-    """
-    kwargs = {"preserving_proto_field_name": True}
-    for k, v in (
+class XrayGrpcError(RuntimeError):
+    """Structured gRPC error for upstream handling."""
+
+    def __init__(self, *, context: str, grpc_code: Optional[str], grpc_details: str):
+        super().__init__(f"grpcio failed ({context}): code={grpc_code} details={grpc_details}")
+        self.context = context
+        self.grpc_code = grpc_code
+        self.grpc_details = grpc_details
+
+
+def _raise_grpc_error(e: grpc.RpcError, *, context: str) -> None:
+    code_obj = e.code() if hasattr(e, "code") else None
+    grpc_code = None
+    try:
+        grpc_code = code_obj.name if code_obj else None
+    except Exception:
+        grpc_code = str(code_obj) if code_obj else None
+
+    details = e.details() if hasattr(e, "details") else str(e)
+    raise XrayGrpcError(context=context, grpc_code=grpc_code, grpc_details=str(details)) from e
+
+
+# -----------------------------
+# Protobuf -> dict (kwargs cached once)
+# -----------------------------
+_SUPPORTED_PB_KWARGS: Dict[str, Any] = {"preserving_proto_field_name": True}
+
+
+def _init_pb_kwargs() -> Dict[str, Any]:
+    base = {"preserving_proto_field_name": True}
+    # use any protobuf message to probe supported kwargs
+    probe = stats_cmd_pb2.SysStatsRequest()
+
+    candidates: Tuple[Tuple[str, Any], ...] = (
         ("including_default_value_fields", False),
         ("use_integers_for_enums", True),
         ("always_print_fields_with_no_presence", False),
-    ):
+    )
+
+    for k, v in candidates:
         try:
-            MessageToDict(msg, **{**kwargs, k: v})
-            kwargs[k] = v
+            MessageToDict(probe, **{**base, k: v})
+            base[k] = v
         except TypeError:
+            # older protobuf does not support it
             pass
-    return MessageToDict(msg, **kwargs)
+
+    return base
+
+
+_SUPPORTED_PB_KWARGS = _init_pb_kwargs()
+
+
+def _pb_to_dict(msg) -> dict:
+    return MessageToDict(msg, **_SUPPORTED_PB_KWARGS)
 
 
 # -----------------------------
-# TypedMessage builders (grpcio: bytes напрямую)
+# TypedMessage builders
 # -----------------------------
 def _typed_message_bytes(type_name: str, msg_bytes: bytes) -> typed_message_pb2.TypedMessage:
     return typed_message_pb2.TypedMessage(type=type_name, value=msg_bytes)
 
 
-def _build_vless_account_bytes(uuid: str, flow: str) -> bytes:
-    acc = vless_account_pb2.Account(id=uuid, flow=flow or "")
+def _build_vless_account_bytes(user_uuid: str, flow: str) -> bytes:
+    acc = vless_account_pb2.Account(id=user_uuid, flow=flow or "")
     return acc.SerializeToString()
 
 
-def _build_add_user_operation_typed(uuid: str, email: str, level: int, flow: str) -> typed_message_pb2.TypedMessage:
-    account_bytes = _build_vless_account_bytes(uuid, flow)
+def _build_add_user_operation_typed(user_uuid: str, email: str, level: int, flow: str) -> typed_message_pb2.TypedMessage:
+    account_bytes = _build_vless_account_bytes(user_uuid, flow)
 
     user = user_pb2.User(
-        level=level,
-        email=email,
+        level=int(level),
+        email=str(email),
         account=_typed_message_bytes("xray.proxy.vless.Account", account_bytes),
     )
 
@@ -97,16 +127,18 @@ def _build_add_user_operation_typed(uuid: str, email: str, level: int, flow: str
 
 
 def _build_remove_user_operation_typed(email: str) -> typed_message_pb2.TypedMessage:
-    op = proxyman_cmd_pb2.RemoveUserOperation(email=email)
+    op = proxyman_cmd_pb2.RemoveUserOperation(email=str(email))
     return _typed_message_bytes("xray.app.proxyman.command.RemoveUserOperation", op.SerializeToString())
 
 
 # -----------------------------
-# gRPC client (канал + stubs, singleton на процесс)
+# gRPC client (singleton per process, thread-safe init)
 # -----------------------------
 _channel: grpc.Channel | None = None
 _handler_stub: proxyman_cmd_pb2_grpc.HandlerServiceStub | None = None
 _stats_stub: stats_cmd_pb2_grpc.StatsServiceStub | None = None
+
+_init_lock = threading.Lock()
 
 
 def _rpc_timeout_sec(default: int = 10) -> int:
@@ -118,9 +150,7 @@ def _rpc_timeout_sec(default: int = 10) -> int:
 
 def _grpc_channel_options() -> list[tuple[str, int]]:
     """
-    Анти-ENHANCE_YOUR_CALM "too_many_pings":
-    - не шлём keepalive без вызовов
-    - большие интервалы
+    Anti-ENHANCE_YOUR_CALM "too_many_pings".
     """
     return [
         ("grpc.keepalive_permit_without_calls", 0),
@@ -135,39 +165,35 @@ def _grpc_channel_options() -> list[tuple[str, int]]:
 def _get_channel() -> grpc.Channel:
     global _channel
     if _channel is None:
-        _channel = grpc.insecure_channel(settings.xray_api_addr, options=_grpc_channel_options())
+        with _init_lock:
+            if _channel is None:
+                _channel = grpc.insecure_channel(settings.xray_api_addr, options=_grpc_channel_options())
     return _channel
 
 
 def _get_handler_stub() -> proxyman_cmd_pb2_grpc.HandlerServiceStub:
     global _handler_stub
     if _handler_stub is None:
-        _handler_stub = proxyman_cmd_pb2_grpc.HandlerServiceStub(_get_channel())
+        with _init_lock:
+            if _handler_stub is None:
+                _handler_stub = proxyman_cmd_pb2_grpc.HandlerServiceStub(_get_channel())
     return _handler_stub
 
 
 def _get_stats_stub() -> stats_cmd_pb2_grpc.StatsServiceStub:
     global _stats_stub
     if _stats_stub is None:
-        _stats_stub = stats_cmd_pb2_grpc.StatsServiceStub(_get_channel())
+        with _init_lock:
+            if _stats_stub is None:
+                _stats_stub = stats_cmd_pb2_grpc.StatsServiceStub(_get_channel())
     return _stats_stub
-
-
-def _raise_grpc_error(e: grpc.RpcError, *, context: str) -> None:
-    code = e.code() if hasattr(e, "code") else None
-    details = e.details() if hasattr(e, "details") else str(e)
-    raise RuntimeError(f"grpcio failed ({context}): code={code} details={details}") from e
 
 
 # -----------------------------
 # Public API
 # -----------------------------
 def xray_api_sys_stats() -> Dict[str, Any]:
-    """
-    GetSysStats — health сигнал.
-
-    В твоей версии proto request = SysStatsRequest (подтверждено).
-    """
+    """GetSysStats — health сигнал."""
     if XRAY_MOCK:
         return {"mock": True, "sys_stats": {}}
 
@@ -184,7 +210,7 @@ def xray_runtime_status() -> Dict[str, Any]:
     host, port = parse_hostport(settings.xray_api_addr)
     port_open = is_tcp_open(host, port)
 
-    status: Dict[str, Any] = {
+    st: Dict[str, Any] = {
         "xray_api_addr": settings.xray_api_addr,
         "xray_api_port_open": port_open,
         "grpcio_present": True,
@@ -192,66 +218,78 @@ def xray_runtime_status() -> Dict[str, Any]:
     }
 
     if XRAY_MOCK:
-        status["ok"] = True
-        status["mock"] = True
-        status["xray_api_sys_stats"] = {"mock": True}
-        return status
+        st["ok"] = True
+        st["mock"] = True
+        st["xray_api_sys_stats"] = {"mock": True}
+        return st
 
     if not port_open:
-        status["ok"] = False
-        status["error"] = "Xray API port is not open"
-        return status
+        st["ok"] = False
+        st["error"] = "Xray API port is not open"
+        return st
 
     try:
-        status["xray_api_sys_stats"] = xray_api_sys_stats()
-        status["ok"] = True
+        st["xray_api_sys_stats"] = xray_api_sys_stats()
+        st["ok"] = True
     except Exception as e:
-        status["ok"] = False
-        status["xray_api_sys_stats_error"] = str(e)
+        st["ok"] = False
+        st["xray_api_sys_stats_error"] = type(e).__name__  # не протекаем строкой наружу
+    return st
 
-    return status
 
-
-def add_client(uuid: str, email: str, inbound_tag: str, level: int = 0, flow: str = "") -> Dict[str, Any]:
-    """Добавить пользователя в inbound через AlterInbound + AddUserOperation."""
+def add_client(user_uuid: str, email: str, inbound_tag: str, level: int = 0, flow: str = "") -> Dict[str, Any]:
+    """Add user to inbound via AlterInbound + AddUserOperation."""
     if XRAY_MOCK:
-        return {"mock": True, "action": "add", "uuid": uuid, "email": email, "inbound_tag": inbound_tag, "level": level, "flow": flow}
+        return {
+            "mock": True,
+            "action": "add",
+            "uuid": user_uuid,
+            "email": email,
+            "inbound_tag": inbound_tag,
+            "level": int(level),
+            "flow": flow,
+            "ok": True,
+        }
 
     try:
-        op_tm = _build_add_user_operation_typed(uuid=uuid, email=email, level=level, flow=flow)
+        op_tm = _build_add_user_operation_typed(user_uuid=user_uuid, email=email, level=int(level), flow=flow)
         req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
         resp = _get_handler_stub().AlterInbound(req, timeout=_rpc_timeout_sec())
+
+        # Xray часто отвечает пустым сообщением => нормализуем
         try:
-            return _pb_to_dict(resp)  # часто {}
+            data = _pb_to_dict(resp)
+            return {"ok": True, "response": data}
         except Exception:
-            return {}
+            return {"ok": True, "response": {}}
     except grpc.RpcError as e:
         _raise_grpc_error(e, context=f"AlterInbound(AddUser) tag={inbound_tag} email={email}")
 
 
 def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
-    """Удалить пользователя из inbound по email."""
+    """Remove user from inbound by email."""
     if XRAY_MOCK:
-        return {"mock": True, "action": "remove", "email": email, "inbound_tag": inbound_tag}
+        return {"mock": True, "action": "remove", "email": email, "inbound_tag": inbound_tag, "ok": True}
 
     try:
         op_tm = _build_remove_user_operation_typed(email=email)
         req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
         resp = _get_handler_stub().AlterInbound(req, timeout=_rpc_timeout_sec())
         try:
-            return _pb_to_dict(resp)
+            data = _pb_to_dict(resp)
+            return {"ok": True, "response": data}
         except Exception:
-            return {}
+            return {"ok": True, "response": {}}
     except grpc.RpcError as e:
         _raise_grpc_error(e, context=f"AlterInbound(RemoveUser) tag={inbound_tag} email={email}")
 
 
 def inbound_users(tag: str) -> Dict[str, Any]:
     """
-    Сырые users inbound.
+    Raw inbound users.
 
-    ВАЖНО: по твоему command_pb2_grpc.py GetInboundUsers принимает GetInboundUserRequest.
-    Используем email="" как "list" запрос.
+    NOTE: GetInboundUsers expects GetInboundUserRequest(tag, email).
+    We use email="" for list.
     """
     if XRAY_MOCK:
         return {"users": []}
@@ -264,20 +302,22 @@ def inbound_users(tag: str) -> Dict[str, Any]:
         _raise_grpc_error(e, context=f"GetInboundUsers tag={tag}")
 
 
-def inbound_users_count(tag: str) -> Dict[str, Any]:
+def inbound_users_count(tag: str) -> int:
     """
-    Количество users inbound.
-
-    ВАЖНО: по твоему command_pb2_grpc.py GetInboundUsersCount принимает GetInboundUserRequest.
-    Используем email="".
+    Returns normalized int count.
     """
     if XRAY_MOCK:
-        return {"count": "0"}
+        return 0
 
     try:
         req = proxyman_cmd_pb2.GetInboundUserRequest(tag=tag, email="")
         resp = _get_handler_stub().GetInboundUsersCount(req, timeout=_rpc_timeout_sec())
-        return _pb_to_dict(resp)
+        data: Dict[str, Any] = _pb_to_dict(resp)
+        raw = data.get("count", 0)
+        try:
+            return int(raw)
+        except Exception:
+            return 0
     except grpc.RpcError as e:
         _raise_grpc_error(e, context=f"GetInboundUsersCount tag={tag}")
 
@@ -288,14 +328,14 @@ def inbound_emails(tag: str) -> list[str]:
     out: list[str] = []
     for u in users:
         if isinstance(u, dict) and u.get("email"):
-            out.append(u["email"])
+            out.append(str(u["email"]))
     return out
 
 
 def inbound_uuids(tag: str) -> list[str]:
     """
-    UUID из TypedMessage VLESS Account.
-    MessageToDict обычно отдаёт TypedMessage.value как base64 string.
+    Extract UUIDs from TypedMessage VLESS Account.
+    MessageToDict usually returns account.value as base64 string.
     """
     data = inbound_users(tag)
     users = data.get("users") or []
