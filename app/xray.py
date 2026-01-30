@@ -20,7 +20,7 @@ from __future__ import annotations
 import base64
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import grpc
 from google.protobuf.json_format import MessageToDict
@@ -31,42 +31,37 @@ from app.utils import parse_hostport, is_tcp_open
 # Protobuf messages
 from xrayproto.common.serial import typed_message_pb2
 from xrayproto.common.protocol import user_pb2
-# from xrayproto.app.proxyman.command import command_pb2 as proxyman_cmd_pb2
 from xrayproto.proxy.vless import account_pb2 as vless_account_pb2
 
-# Protobuf gRPC stubs (важно: *_pb2_grpc должны быть в твоей генерации)
+# Proxyman/Handler service
+from xrayproto.app.proxyman.command import command_pb2 as proxyman_cmd_pb2
 from xrayproto.app.proxyman.command import command_pb2_grpc as proxyman_cmd_pb2_grpc
 
-# Stats service proto/stub
+# Stats service
 from xrayproto.app.stats.command import command_pb2 as stats_cmd_pb2
 from xrayproto.app.stats.command import command_pb2_grpc as stats_cmd_pb2_grpc
-
-from xrayproto.app.proxyman.command import command_pb2 as proxyman_cmd_pb2
 
 XRAY_MOCK = os.getenv("XRAY_MOCK", "").lower() in ("1", "true", "yes")
 
 
 # -----------------------------
-# Helpers: protobuf -> dict
+# Protobuf -> dict (совместимость между версиями protobuf)
 # -----------------------------
-from google.protobuf.json_format import MessageToDict
-
 def _pb_to_dict(msg) -> dict:
     """
-    Protobuf -> dict с максимальной совместимостью между версиями protobuf.
-    """
-    kwargs = {
-        "preserving_proto_field_name": True,
-    }
+    Protobuf -> dict с максимальной совместимостью между версиями protobuf/json_format.
 
-    # Эти аргументы есть не во всех версиях protobuf/json_format
+    Важно: разные версии protobuf имеют разные параметры MessageToDict.
+    Мы пробуем включить полезные, но мягко деградируем.
+    """
+    kwargs = {"preserving_proto_field_name": True}
+
     for k, v in (
         ("including_default_value_fields", False),
         ("use_integers_for_enums", True),
         ("always_print_fields_with_no_presence", False),
     ):
         try:
-            # пробуем передать аргумент — если версия не поддерживает, проигнорируем
             MessageToDict(msg, **{**kwargs, k: v})
             kwargs[k] = v
         except TypeError:
@@ -75,71 +70,85 @@ def _pb_to_dict(msg) -> dict:
     return MessageToDict(msg, **kwargs)
 
 
-
 # -----------------------------
-# TypedMessage builders (без base64 туда-сюда)
+# TypedMessage builders (grpcio: bytes напрямую)
 # -----------------------------
 def _typed_message_bytes(type_name: str, msg_bytes: bytes) -> typed_message_pb2.TypedMessage:
-    """
-    TypedMessage для Xray (grpcio вариант): напрямую bytes, без base64.
-    """
     return typed_message_pb2.TypedMessage(type=type_name, value=msg_bytes)
 
 
 def _build_vless_account_bytes(uuid: str, flow: str) -> bytes:
-    """
-    Собираем bytes для xray.proxy.vless.Account.
-    """
     acc = vless_account_pb2.Account(id=uuid, flow=flow or "")
     return acc.SerializeToString()
 
 
 def _build_add_user_operation_typed(uuid: str, email: str, level: int, flow: str) -> typed_message_pb2.TypedMessage:
-    """
-    Собрать operation = TypedMessage(AddUserOperation) для AlterInboundRequest.operation.
-    """
     account_bytes = _build_vless_account_bytes(uuid, flow)
+
     user = user_pb2.User(
         level=level,
         email=email,
         account=_typed_message_bytes("xray.proxy.vless.Account", account_bytes),
     )
+
     op = proxyman_cmd_pb2.AddUserOperation(user=user)
     return _typed_message_bytes("xray.app.proxyman.command.AddUserOperation", op.SerializeToString())
 
 
 def _build_remove_user_operation_typed(email: str) -> typed_message_pb2.TypedMessage:
-    """
-    operation = TypedMessage(RemoveUserOperation) для AlterInboundRequest.operation.
-    """
     op = proxyman_cmd_pb2.RemoveUserOperation(email=email)
     return _typed_message_bytes("xray.app.proxyman.command.RemoveUserOperation", op.SerializeToString())
 
 
 # -----------------------------
-# gRPC client (канал + stubs, lazy singleton)
+# gRPC client (канал + stubs, singleton на процесс)
 # -----------------------------
 _channel: grpc.Channel | None = None
 _handler_stub: proxyman_cmd_pb2_grpc.HandlerServiceStub | None = None
 _stats_stub: stats_cmd_pb2_grpc.StatsServiceStub | None = None
 
 
+def _rpc_timeout_sec(default: int = 10) -> int:
+    try:
+        return int(getattr(settings, "xray_rpc_timeout_sec", default))
+    except Exception:
+        return default
+
+
+def _grpc_channel_options() -> list[tuple[str, int]]:
+    """
+    Безопасные настройки канала.
+
+    Почему так:
+    - Мы уже видели GOAWAY ENHANCE_YOUR_CALM "too_many_pings".
+    - Это лечится тем, что НЕ пингуем без активных вызовов и увеличиваем интервалы.
+
+    Если хочешь максимально просто и надёжно для localhost:
+      верни пустой список [] и используй insecure_channel без options.
+    """
+    return [
+        # НЕ пингуем без активных вызовов
+        ("grpc.keepalive_permit_without_calls", 0),
+
+        # редкие пинги (если соединение простаивает) — безопасно
+        ("grpc.keepalive_time_ms", 120_000),  # 2 минуты
+        ("grpc.keepalive_timeout_ms", 10_000),
+
+        # лимитируем ping-и без данных (если вдруг библиотека пытается)
+        ("grpc.http2.max_pings_without_data", 1),
+
+        # минимальные интервалы между пингами
+        ("grpc.http2.min_time_between_pings_ms", 60_000),
+        ("grpc.http2.min_ping_interval_without_data_ms", 120_000),
+    ]
+
+
 def _get_channel() -> grpc.Channel:
-    """
-    Канал создаём один раз на процесс (и переиспользуем).
-    """
     global _channel
     if _channel is None:
-        # settings.xray_api_addr ожидается как "host:port" (например 127.0.0.1:10085)
-        _channel = grpc.insecure_channel(
-            settings.xray_api_addr,
-            options=[
-                ("grpc.keepalive_time_ms", 30_000),
-                ("grpc.keepalive_timeout_ms", 10_000),
-                ("grpc.http2.max_pings_without_data", 0),
-                ("grpc.keepalive_permit_without_calls", 1),
-            ],
-        )
+        # Для localhost часто лучше вообще без options:
+        # _channel = grpc.insecure_channel(settings.xray_api_addr)
+        _channel = grpc.insecure_channel(settings.xray_api_addr, options=_grpc_channel_options())
     return _channel
 
 
@@ -157,35 +166,34 @@ def _get_stats_stub() -> stats_cmd_pb2_grpc.StatsServiceStub:
     return _stats_stub
 
 
-def _rpc_timeout_sec(default: int = 10) -> int:
-    try:
-        return int(getattr(settings, "xray_rpc_timeout_sec", default))
-    except Exception:
-        return default
+def _raise_grpc_error(e: grpc.RpcError, *, context: str) -> None:
+    """
+    Нормализуем ошибку grpcio в человеческий RuntimeError (как у тебя было с grpcurl).
+    """
+    code = getattr(e, "code", lambda: None)()
+    details = getattr(e, "details", lambda: "")()
+    raise RuntimeError(f"grpcio failed ({context}): code={code} details={details}") from e
 
 
 # -----------------------------
-# Public API (same signatures/semantics)
+# Public API (контракт как раньше)
 # -----------------------------
 def xray_api_sys_stats() -> Dict[str, Any]:
     """
     GetSysStats — удобный health сигнал.
 
-    NOTE: если у тебя в proto request называется иначе — поправь строку ниже.
-    Обычно это GetSysStatsRequest().
+    В твоей версии proto request называется SysStatsRequest (проверено).
     """
     if XRAY_MOCK:
         return {"mock": True, "sys_stats": {}}
 
-    stub = _get_stats_stub()
-
-    # В большинстве сборок:
-    # req = stats_cmd_pb2.GetSysStatsRequest()
-    # resp = stub.GetSysStats(req, timeout=_rpc_timeout_sec())
-    req = stats_cmd_pb2.GetSysStatsRequest()  # <-- если имя отличается, поменяй тут
-    resp = stub.GetSysStats(req, timeout=_rpc_timeout_sec())
-
-    return _pb_to_dict(resp)
+    try:
+        stub = _get_stats_stub()
+        req = stats_cmd_pb2.SysStatsRequest()  # <-- ВАЖНО: именно SysStatsRequest
+        resp = stub.GetSysStats(req, timeout=_rpc_timeout_sec())
+        return _pb_to_dict(resp)
+    except grpc.RpcError as e:
+        _raise_grpc_error(e, context="GetSysStats")
 
 
 def xray_runtime_status() -> Dict[str, Any]:
@@ -193,8 +201,6 @@ def xray_runtime_status() -> Dict[str, Any]:
     Сводный статус:
     - открыт ли порт Xray gRPC
     - sys stats (если доступно)
-
-    В grpcio варианте grpcurl не нужен, поэтому grpcurl_present заменяем на grpcio_present.
     """
     host, port = parse_hostport(settings.xray_api_addr)
     port_open = is_tcp_open(host, port)
@@ -228,10 +234,7 @@ def xray_runtime_status() -> Dict[str, Any]:
 
 
 def add_client(uuid: str, email: str, inbound_tag: str, level: int = 0, flow: str = "") -> Dict[str, Any]:
-    """
-    Добавить пользователя в inbound через AlterInbound + AddUserOperation.
-    Возвращает dict (как и раньше): для Empty response будет {}.
-    """
+    """Добавить пользователя в inbound через AlterInbound + AddUserOperation."""
     if XRAY_MOCK:
         return {
             "mock": True,
@@ -243,28 +246,20 @@ def add_client(uuid: str, email: str, inbound_tag: str, level: int = 0, flow: st
             "flow": flow,
         }
 
-    op_tm = _build_add_user_operation_typed(uuid=uuid, email=email, level=level, flow=flow)
-
-    # В большинстве сборок:
-    # req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
-    req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
-
-    stub = _get_handler_stub()
-    resp = stub.AlterInbound(req, timeout=_rpc_timeout_sec())
-
-    # AlterInbound чаще всего возвращает google.protobuf.Empty -> MessageToDict вернёт {}
-    # но resp может быть и Empty без полей.
     try:
-        return _pb_to_dict(resp)
-    except Exception:
-        return {}
+        op_tm = _build_add_user_operation_typed(uuid=uuid, email=email, level=level, flow=flow)
+        req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
+        resp = _get_handler_stub().AlterInbound(req, timeout=_rpc_timeout_sec())
+        try:
+            return _pb_to_dict(resp)  # чаще всего {}
+        except Exception:
+            return {}
+    except grpc.RpcError as e:
+        _raise_grpc_error(e, context=f"AlterInbound(AddUser) tag={inbound_tag} email={email}")
 
 
 def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
-    """
-    Удалить пользователя из inbound по email.
-    Возвращает dict (как и раньше): для Empty response будет {}.
-    """
+    """Удалить пользователя из inbound по email."""
     if XRAY_MOCK:
         return {
             "mock": True,
@@ -273,55 +268,46 @@ def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
             "inbound_tag": inbound_tag,
         }
 
-    op_tm = _build_remove_user_operation_typed(email=email)
-    req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
-
-    stub = _get_handler_stub()
-    resp = stub.AlterInbound(req, timeout=_rpc_timeout_sec())
     try:
-        return _pb_to_dict(resp)
-    except Exception:
-        return {}
+        op_tm = _build_remove_user_operation_typed(email=email)
+        req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
+        resp = _get_handler_stub().AlterInbound(req, timeout=_rpc_timeout_sec())
+        try:
+            return _pb_to_dict(resp)  # чаще всего {}
+        except Exception:
+            return {}
+    except grpc.RpcError as e:
+        _raise_grpc_error(e, context=f"AlterInbound(RemoveUser) tag={inbound_tag} email={email}")
 
 
 def inbound_users(tag: str) -> Dict[str, Any]:
-    """
-    Сырые users inbound (grpcio).
-    """
+    """Сырые users inbound."""
     if XRAY_MOCK:
         return {"users": []}
 
-    stub = _get_handler_stub()
-
-    # Обычно:
-    # req = proxyman_cmd_pb2.GetInboundUsersRequest(tag=tag)
-    req = proxyman_cmd_pb2.GetInboundUsersRequest(tag=tag)  # <-- если имя отличается, поменяй тут
-    resp = stub.GetInboundUsers(req, timeout=_rpc_timeout_sec())
-
-    return _pb_to_dict(resp)
+    try:
+        req = proxyman_cmd_pb2.GetInboundUsersRequest(tag=tag)
+        resp = _get_handler_stub().GetInboundUsers(req, timeout=_rpc_timeout_sec())
+        return _pb_to_dict(resp)
+    except grpc.RpcError as e:
+        _raise_grpc_error(e, context=f"GetInboundUsers tag={tag}")
 
 
 def inbound_users_count(tag: str) -> Dict[str, Any]:
-    """
-    Количество users inbound (grpcio).
-    """
+    """Количество users inbound."""
     if XRAY_MOCK:
         return {"count": "0"}
 
-    stub = _get_handler_stub()
-
-    # Обычно:
-    # req = proxyman_cmd_pb2.GetInboundUsersCountRequest(tag=tag)
-    req = proxyman_cmd_pb2.GetInboundUsersCountRequest(tag=tag)  # <-- если имя отличается, поменяй тут
-    resp = stub.GetInboundUsersCount(req, timeout=_rpc_timeout_sec())
-
-    return _pb_to_dict(resp)
+    try:
+        req = proxyman_cmd_pb2.GetInboundUsersCountRequest(tag=tag)
+        resp = _get_handler_stub().GetInboundUsersCount(req, timeout=_rpc_timeout_sec())
+        return _pb_to_dict(resp)
+    except grpc.RpcError as e:
+        _raise_grpc_error(e, context=f"GetInboundUsersCount tag={tag}")
 
 
 def inbound_emails(tag: str) -> list[str]:
-    """
-    Список email пользователей inbound.
-    """
+    """Список email пользователей inbound."""
     data = inbound_users(tag)
     users = data.get("users") or []
     return [u["email"] for u in users if isinstance(u, dict) and u.get("email")]
@@ -331,11 +317,7 @@ def inbound_uuids(tag: str) -> list[str]:
     """
     Достаём UUID из TypedMessage VLESS Account.
 
-    user.account: {type: "...", value: "<base64>"}
-    value -> bytes -> vless_account_pb2.Account -> .id
-
-    В grpcio-ответе account.value часто приходит как base64-строка (через MessageToDict),
-    поэтому оставляем прежнюю логику декодирования base64.
+    В dict (MessageToDict) поле TypedMessage.value обычно приходит как base64 string.
     """
     data = inbound_users(tag)
     users = data.get("users") or []
@@ -360,7 +342,6 @@ def inbound_uuids(tag: str) -> list[str]:
             if getattr(vless_acc, "id", ""):
                 out.append(vless_acc.id)
         except Exception:
-            # если попался невалидный value — просто пропускаем
             continue
 
     return out
