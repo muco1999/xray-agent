@@ -1,106 +1,98 @@
 """
-FastAPI entrypoint for Xray Agent.
+FastAPI entrypoint for Xray Agent API.
 
-Этот сервис предоставляет удалённое управление Xray через gRPC API:
-- health/status
-- add/remove VLESS users (через AlterInbound + TypedMessage)
-- получение пользователей inbound: users/emails/uuids
-- async очередь через Redis (опционально, ?async=true)
+Назначение:
+- Управление Xray через gRPC API (через grpcurl внутри add/remove функций)
+- Health/status
+- Просмотр inbound (count/emails)
+- Async jobs через Redis:
+    - remove_client (опционально)
+    - issue_client: генерировать UUID + add_client + build link + notify (через worker)
 
-Авторизация:
-- Заголовок: Authorization: Bearer <API_TOKEN>
+Auth:
+- Header: Authorization: Bearer <API_TOKEN>
 """
 
-from fastapi import FastAPI, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from __future__ import annotations
 
+from fastapi import FastAPI, Query, Depends, HTTPException
+from starlette import status
+from starlette.responses import JSONResponse
 from app.auth import require_token
 from app.config import settings
-from app.queue import enqueue_job, get_job
+from app.models import (
+    JobEnqueueResponse,
+    IssueClientRequest,
+    JobStatusResponse,
+)
+from app.redis_client import r  # sync redis client
+from app.queue import (
+    enqueue_job,           # legacy: add/remove jobs
+    enqueue_issue_job,     # issue_client job
+    get_job_state,         # job polling
+)
 from app.xray import (
     xray_runtime_status,
-    add_client,
     remove_client,
-    inbound_users,
     inbound_users_count,
     inbound_emails,
-    inbound_uuids,
 )
 
 app = FastAPI(title="Xray Agent API", version="1.0.0")
 
 
-class ClientAddRequest(BaseModel):
-    """
-    Запрос на добавление клиента в inbound.
-
-    email:
-      - служит уникальным идентификатором пользователя
-      - используется для удаления
-    uuid:
-      - VLESS UUID
-    inbound_tag:
-      - tag inbound в Xray, куда добавляем пользователя (обычно "vless-in")
-    """
-    uuid: str = Field(..., description="VLESS UUID")
-    email: str = Field(..., description="Unique identifier used for remove")
-    inbound_tag: str = Field(default_factory=lambda: settings.default_inbound_tag)
-    level: int = 0
-    flow: str = ""
-
-
-class JobEnqueueResponse(BaseModel):
-    """Ответ при async=true: возвращаем job_id для опроса статуса."""
-    job_id: str
-
-
 @app.get("/health/full", dependencies=[Depends(require_token)])
 def health_full():
     """
-    Полная проверка работоспособности:
-    - порт Xray API открыт
-    - grpcurl доступен
-    - GetSysStats успешен (через proto, без reflection)
-
-    Возвращает ok=true только если все проверки прошли.
+    Full health:
+    - Xray API gRPC reachable
+    - grpcurl present
+    - sys stats query (if implemented in xray_runtime_status)
     """
-    status = xray_runtime_status()
-    return {"time": status.get("time"), "xray": status, "ok": bool(status.get("ok"))}
+    st = xray_runtime_status()
+    return {"time": st.get("time"), "xray": st, "ok": bool(st.get("ok"))}
 
 
 @app.get("/xray/status", dependencies=[Depends(require_token)])
 def xray_status():
     """
-    Быстрый статус Xray API:
-    - открыт ли порт gRPC
-    - есть ли grpcurl
-    - (опционально) sys stats
+    Quick status for Xray API.
     """
     return xray_runtime_status()
 
 
-@app.post("/clients", dependencies=[Depends(require_token)])
-def api_add_client(req: ClientAddRequest, async_: bool = Query(False, alias="async")):
+@app.get("/inbounds/{tag}/users/count", dependencies=[Depends(require_token)])
+def api_inbound_users_count(tag: str):
+    """Inbound user count (runtime state)."""
+    return {"result": inbound_users_count(tag)}
+
+
+@app.get("/inbounds/{tag}/emails", dependencies=[Depends(require_token)])
+def api_inbound_emails(tag: str):
+    """Inbound emails list (runtime state)."""
+    return {"result": inbound_emails(tag)}
+
+
+@app.get(
+    "/jobs/{job_id}",
+    response_model=JobStatusResponse,
+    dependencies=[Depends(require_token)],
+    summary="Get job status/result",
+)
+def api_job_get(job_id: str):
     """
-    Добавить клиента в inbound.
+    Poll async job status.
 
-    Sync режим:
-      POST /clients
-      -> выполняем grpcurl AlterInbound сразу
-
-    Async режим:
-      POST /clients?async=true
-      -> кладём задачу в Redis, возвращаем job_id
-      -> worker выполнит добавление
+    states:
+      - queued
+      - running
+      - done (result contains payload)
+      - error (error contains traceback)
     """
-    if async_:
-        job_id = enqueue_job("add_client", req.model_dump())
-        return JobEnqueueResponse(job_id=job_id)
-
-    try:
-        return {"result": add_client(req.uuid, req.email, req.inbound_tag, req.level, req.flow)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    st = get_job_state(r, job_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="job not found")
+    return st
 
 
 @app.delete("/clients/{email}", dependencies=[Depends(require_token)])
@@ -110,17 +102,18 @@ def api_remove_client(
     async_: bool = Query(False, alias="async"),
 ):
     """
-    Удалить клиента по email из inbound.
+    Remove client by email (telegram_id) from inbound.
 
     Sync:
       DELETE /clients/{email}?inbound_tag=vless-in
 
     Async:
       DELETE /clients/{email}?inbound_tag=vless-in&async=true
+      -> enqueue job remove_client
     """
     if async_:
         job_id = enqueue_job("remove_client", {"email": email, "inbound_tag": inbound_tag})
-        return JobEnqueueResponse(job_id=job_id)
+        return {"job_id": job_id}
 
     try:
         return {"result": remove_client(email=email, inbound_tag=inbound_tag)}
@@ -128,43 +121,36 @@ def api_remove_client(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/inbounds/{tag}/users", dependencies=[Depends(require_token)])
-def api_inbound_users(tag: str):
+@app.post(
+    "/clients/issue",
+    response_model=JobEnqueueResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_token)],
+    summary="Issue new client (async): worker generates UUID, adds to Xray, builds link, and notifies external service.",
+)
+def api_issue_client(req: IssueClientRequest, async_: bool = Query(True, alias="async")):
     """
-    Вернуть сырые данные пользователей inbound (как отдаёт Xray GetInboundUsers).
+    Async by default.
+
+    Flow:
+      - API enqueues issue_client job
+      - worker:
+          * generates UUID
+          * add_client(uuid, telegram_id, inbound_tag, level, flow)
+          * builds vless:// link from .env (PUBLIC_HOST/REALITY_*)
+          * (optional) POSTs payload to notify-server /v1/notify
+      - client polls GET /jobs/{job_id}
     """
-    return {"result": inbound_users(tag)}
+    if not async_:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "sync mode disabled; use /clients/issue?async=true"},
+        )
 
 
-@app.get("/inbounds/{tag}/users/count", dependencies=[Depends(require_token)])
-def api_inbound_users_count(tag: str):
-    """Количество пользователей inbound."""
-    return {"result": inbound_users_count(tag)}
+    job_id, deduped = enqueue_issue_job(req.model_dump())
 
-
-@app.get("/inbounds/{tag}/emails", dependencies=[Depends(require_token)])
-def api_inbound_emails(tag: str):
-    """Список email пользователей inbound."""
-    return {"result": inbound_emails(tag)}
-
-
-@app.get("/inbounds/{tag}/uuids", dependencies=[Depends(require_token)])
-def api_inbound_uuids(tag: str):
-    """
-    Список UUID пользователей inbound (только VLESS Account).
-    UUID извлекается из TypedMessage.value -> protobuf decode.
-    """
-    return {"result": inbound_uuids(tag)}
-
-
-@app.get("/jobs/{job_id}", dependencies=[Depends(require_token)])
-def api_job_get(job_id: str):
-    """
-    Получить статус async-задачи из Redis.
-    states:
-      - queued
-      - running
-      - done
-      - error
-    """
-    return get_job(job_id)
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content=JobEnqueueResponse(job_id=job_id, deduped=deduped).model_dump(),
+    )
