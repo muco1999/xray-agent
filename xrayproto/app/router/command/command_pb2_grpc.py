@@ -2,7 +2,8 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-from xrayproto.app import command_pb2 as app_dot_router_dot_command_dot_command__pb2
+from xrayproto.app.router.command import command_pb2 as app_dot_router_dot_command_dot_command__pb2
+
 
 GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__
