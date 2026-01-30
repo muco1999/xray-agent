@@ -31,6 +31,11 @@ class Settings(BaseSettings):
 
     default_flow: str = Field(default="", alias="DEFAULT_FLOW")
 
+    notify_url: str | None = Field(default=None, alias="NOTIFY_URL")
+    notify_api_key: str | None = Field(default=None, alias="NOTIFY_API_KEY")
+    notify_timeout_sec: int = Field(default=10, alias="NOTIFY_TIMEOUT_SEC")
+    notify_retries: int = Field(default=3, alias="NOTIFY_RETRIES")
+
 
 
 

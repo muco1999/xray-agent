@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 
 from app.config import settings
 from app.utils import run_cmd, parse_hostport, is_tcp_open
-
+import os
 # Python protobuf classes (генерятся/подключаются в твоей сборке как xrayproto.*)
 from xrayproto.common.serial import typed_message_pb2
 from xrayproto.common.protocol import user_pb2
@@ -29,6 +29,8 @@ GET_SYS_STATS_METHOD = "xray.app.stats.command.StatsService.GetSysStats"
 GET_INBOUND_USERS_METHOD = "xray.app.proxyman.command.HandlerService.GetInboundUsers"
 GET_INBOUND_USERS_COUNT_METHOD = "xray.app.proxyman.command.HandlerService.GetInboundUsersCount"
 
+
+XRAY_MOCK = os.getenv("XRAY_MOCK", "").lower() in ("1", "true", "yes")
 
 def _typed_message(type_name: str, msg_bytes: bytes) -> Dict[str, Any]:
     """
@@ -174,6 +176,18 @@ def xray_runtime_status() -> Dict[str, Any]:
 
 def add_client(uuid: str, email: str, inbound_tag: str, level: int = 0, flow: str = "") -> Dict[str, Any]:
     """Добавить пользователя в inbound через AlterInbound + AddUserOperation."""
+    # Это тестовой режм локално XRAY_MOCK
+    if XRAY_MOCK:
+        return {
+            "mock": True,
+            "action": "add",
+            "uuid": uuid,
+            "email": email,
+            "inbound_tag": inbound_tag,
+            "level": level,
+            "flow": flow,
+        }
+
     op_tm = _build_add_user_operation_typed(uuid=uuid, email=email, level=level, flow=flow)
     payload = {"tag": inbound_tag, "operation": op_tm}
     return grpcurl_call(ALTER_INBOUND_METHOD, payload)
@@ -181,6 +195,16 @@ def add_client(uuid: str, email: str, inbound_tag: str, level: int = 0, flow: st
 
 def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
     """Удалить пользователя из inbound по email."""
+    # Это тестовой режм локално XRAY_MOCK
+    if XRAY_MOCK:
+        return {
+            "mock": True,
+            "action": "remove",
+            "email": email,
+            "inbound_tag": inbound_tag,
+        }
+
+
     op_tm = _build_remove_user_operation_typed(email=email)
     payload = {"tag": inbound_tag, "operation": op_tm}
     return grpcurl_call(ALTER_INBOUND_METHOD, payload)
