@@ -53,10 +53,6 @@ def set_job_state(r, job_id: str, state: str, *, result: dict | None = None, err
     r.set(_job_key(job_id), json.dumps(payload), ex=3600)
 
 
-def get_job_state(r, job_id: str) -> dict | None:
-    raw = r.get(_job_key(job_id))
-    return json.loads(raw) if raw else None
-
 
 def make_idempotency_key(req: IssueClientRequest) -> str:
     # один пользователь + inbound → одна задача

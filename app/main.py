@@ -89,7 +89,7 @@ def api_job_get(job_id: str):
       - done (result contains payload)
       - error (error contains traceback)
     """
-    st = get_job_state(r, job_id)
+    st = get_job_state(job_id)
     if not st:
         raise HTTPException(status_code=404, detail="job not found")
     return st
