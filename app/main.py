@@ -2,12 +2,11 @@
 FastAPI entrypoint for Xray Agent API.
 
 Назначение:
-- Управление Xray через gRPC API (через grpcurl внутри add/remove функций)
-- Health/status
-- Просмотр inbound (count/emails)
+- Health/status (sys stats через grpcio)
+- Просмотр inbound (count/emails) через grpcio
 - Async jobs через Redis:
-    - remove_client (опционально)
-    - issue_client: генерировать UUID + add_client + build link + notify (через worker)
+    - issue_client: через worker (UUID + add_client + build link + notify)
+    - remove_client: sync или async
 
 Auth:
 - Header: Authorization: Bearer <API_TOKEN>
@@ -18,25 +17,13 @@ from __future__ import annotations
 from fastapi import FastAPI, Query, Depends, HTTPException
 from starlette import status
 from starlette.responses import JSONResponse
+
 from app.auth import require_token
 from app.config import settings
-from app.models import (
-    JobEnqueueResponse,
-    IssueClientRequest,
-    JobStatusResponse,
-)
-from app.redis_client import r  # sync redis client
-from app.queue import (
-    enqueue_job,           # legacy: add/remove jobs
-    enqueue_issue_job,     # issue_client job
-    get_job_state,         # job polling
-)
-from app.xray import (
-    xray_runtime_status,
-    remove_client,
-    inbound_users_count,
-    inbound_emails,
-)
+from app.models import JobEnqueueResponse, IssueClientRequest, JobStatusResponse
+from app.queue import enqueue_job, enqueue_issue_job, get_job_state
+from app.xray import xray_runtime_status, remove_client, inbound_users_count, inbound_emails
+
 
 app = FastAPI(title="Xray Agent API", version="1.0.0")
 
@@ -44,10 +31,9 @@ app = FastAPI(title="Xray Agent API", version="1.0.0")
 @app.get("/health/full", dependencies=[Depends(require_token)])
 def health_full():
     """
-    Full health:
-    - Xray API gRPC reachable
-    - grpcurl present
-    - sys stats query (if implemented in xray_runtime_status)
+    Полная проверка:
+    - доступен ли gRPC порт Xray
+    - sys stats (GetSysStats)
     """
     st = xray_runtime_status()
     return {"time": st.get("time"), "xray": st, "ok": bool(st.get("ok"))}
@@ -55,22 +41,27 @@ def health_full():
 
 @app.get("/xray/status", dependencies=[Depends(require_token)])
 def xray_status():
-    """
-    Quick status for Xray API.
-    """
+    """Быстрый статус Xray."""
     return xray_runtime_status()
 
 
 @app.get("/inbounds/{tag}/users/count", dependencies=[Depends(require_token)])
 def api_inbound_users_count(tag: str):
-    """Inbound user count (runtime state)."""
-    return {"result": inbound_users_count(tag)}
+    """Количество пользователей inbound (runtime state)."""
+    try:
+        return {"result": inbound_users_count(tag)}
+    except Exception as e:
+        # 502: проблема с upstream (Xray gRPC / сеть / proto mismatch)
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.get("/inbounds/{tag}/emails", dependencies=[Depends(require_token)])
 def api_inbound_emails(tag: str):
-    """Inbound emails list (runtime state)."""
-    return {"result": inbound_emails(tag)}
+    """Список email пользователей inbound (runtime state)."""
+    try:
+        return {"result": inbound_emails(tag)}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.get(
@@ -86,11 +77,11 @@ def api_job_get(job_id: str):
     states:
       - queued
       - running
-      - done (result contains payload)
-      - error (error contains traceback)
+      - done
+      - error
     """
     st = get_job_state(job_id)
-    if st["state"] == "not_found":
+    if st.get("state") == "not_found":
         raise HTTPException(status_code=404, detail="job not found")
     return st
 
@@ -102,14 +93,14 @@ def api_remove_client(
     async_: bool = Query(False, alias="async"),
 ):
     """
-    Remove client by email (telegram_id) from inbound.
+    Удалить клиента по email (telegram_id) из inbound.
 
     Sync:
       DELETE /clients/{email}?inbound_tag=vless-in
 
     Async:
       DELETE /clients/{email}?inbound_tag=vless-in&async=true
-      -> enqueue job remove_client
+      -> enqueue remove_client job
     """
     if async_:
         job_id = enqueue_job("remove_client", {"email": email, "inbound_tag": inbound_tag})
@@ -118,7 +109,7 @@ def api_remove_client(
     try:
         return {"result": remove_client(email=email, inbound_tag=inbound_tag)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.post(
@@ -126,7 +117,7 @@ def api_remove_client(
     response_model=JobEnqueueResponse,
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(require_token)],
-    summary="Issue new client (async): worker generates UUID, adds to Xray, builds link, and notifies external service.",
+    summary="Issue new client (async): worker generates UUID, adds to Xray, builds link, optional notify.",
 )
 def api_issue_client(req: IssueClientRequest, async_: bool = Query(True, alias="async")):
     """
@@ -135,18 +126,17 @@ def api_issue_client(req: IssueClientRequest, async_: bool = Query(True, alias="
     Flow:
       - API enqueues issue_client job
       - worker:
-          * generates UUID
+          * генерирует UUID
           * add_client(uuid, telegram_id, inbound_tag, level, flow)
-          * builds vless:// link from .env (PUBLIC_HOST/REALITY_*)
-          * (optional) POSTs payload to notify-server /v1/notify
-      - client polls GET /jobs/{job_id}
+          * генерирует vless:// link из .env
+          * (опционально) POST на notify-server /v1/notify
+      - клиент поллит GET /jobs/{job_id}
     """
     if not async_:
         return JSONResponse(
             status_code=400,
             content={"detail": "sync mode disabled; use /clients/issue?async=true"},
         )
-
 
     job_id, deduped = enqueue_issue_job(req.model_dump())
 
