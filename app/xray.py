@@ -357,7 +357,7 @@ def add_client(user_uuid: str, email: str, inbound_tag: str, level: int = 0, flo
             email=_mask(email),
             uuid=_mask(user_uuid),
             level=int(level),
-            flow=flow or "",
+            flow=flow or "xtls-rprx-vision",
         ):
             _ensure_channel_ready()
             op_tm = _build_add_user_operation_typed(user_uuid=user_uuid, email=email, level=int(level), flow=flow)

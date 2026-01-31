@@ -42,12 +42,12 @@ def build_vless_link(user_uuid: str, email: str, flow: str) -> str:
 
     port = int(getattr(settings, "public_port", 443) or 443)
     fp = getattr(settings, "reality_fp", "chrome") or "chrome"
-    flow_q = f"&flow={flow}" if flow else ""
+    flow_q = f"&flow={flow}" if flow else "xtls-rprx-vision"
 
     return (
         f"vless://{user_uuid}@{settings.public_host}:{port}"
         f"?encryption=none"
-        # f"{flow_q}"
+        f"{flow_q}"
         f"&security=reality"
         f"&sni={settings.reality_sni}"
         f"&fp={fp}"
