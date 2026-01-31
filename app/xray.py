@@ -13,15 +13,24 @@ Xray gRPC адаптер (grpcio).
   иногда grpcio "залипает" на сломанном соединении/после рестартов Xray.
   Если канал не готов, мы пересоздаём channel/stubs и пробуем снова.
   Это предотвращает вечное состояние job="running" в worker.
+
+Логирование (добавлено):
+- Структурные json-логи на каждый RPC (start/ok/fail + latency)
+- Всегда логируем addr/tag/email/uuid (email/uuid маскируются)
+- Логируем какой request использован для list/count (GetInboundUsersRequest vs GetInboundUserRequest)
+- Логируем grpc code/details при ошибках
 """
 
 from __future__ import annotations
 
 import base64
+import json
+import logging
 import os
 import threading
 import time
-from typing import Any, Dict, Tuple
+from contextlib import contextmanager
+from typing import Any, Dict
 
 import grpc
 from google.protobuf.json_format import MessageToDict
@@ -45,6 +54,59 @@ from xrayproto.app.stats.command import command_pb2_grpc as stats_cmd_pb2_grpc
 
 XRAY_MOCK = os.getenv("XRAY_MOCK", "").lower() in ("1", "true", "yes")
 
+log = logging.getLogger("xray-agent.xray")
+
+
+# =============================================================================
+# Logging helpers
+# =============================================================================
+def _mask(s: str, keep: int = 3) -> str:
+    """
+    Маскирует строку для логов (email/uuid).
+    keep=3 => abc***xyz
+    """
+    if not s:
+        return ""
+    s = str(s)
+    if len(s) <= keep * 2:
+        return "*" * len(s)
+    return f"{s[:keep]}***{s[-keep:]}"
+
+
+def _grpc_err_info(e: grpc.RpcError) -> Dict[str, Any]:
+    code = None
+    details = None
+    try:
+        code = e.code()
+    except Exception:
+        pass
+    try:
+        details = e.details()
+    except Exception:
+        details = str(e)
+    return {"code": str(code), "details": str(details)[:500]}
+
+
+@contextmanager
+def _rpc_log_ctx(op: str, **fields):
+    """
+    Контекст логирования RPC: start/ok/fail + latency ms.
+    Логи в JSON строке, удобно для Loki/ELK.
+    """
+    t0 = time.perf_counter()
+    base = {"op": op, **fields}
+
+    log.info("xray rpc start %s", json.dumps(base, ensure_ascii=False))
+    try:
+        yield base
+        dt = round((time.perf_counter() - t0) * 1000, 2)
+        log.info("xray rpc ok %s", json.dumps({**base, "ms": dt}, ensure_ascii=False))
+    except Exception as e:
+        dt = round((time.perf_counter() - t0) * 1000, 2)
+        payload = {**base, "ms": dt, "exc": type(e).__name__, "msg": str(e)[:500]}
+        log.error("xray rpc fail %s", json.dumps(payload, ensure_ascii=False))
+        raise
+
 
 # =============================================================================
 # Вспомогательное: protobuf -> dict (совместимость версий protobuf)
@@ -66,7 +128,6 @@ def _pb_to_dict(msg) -> dict:
             MessageToDict(msg, **{**kwargs, k: v})
             kwargs[k] = v
         except TypeError:
-            # Опция не поддерживается текущей версией protobuf
             pass
     return MessageToDict(msg, **kwargs)
 
@@ -124,9 +185,6 @@ _lock = threading.Lock()
 
 
 def _rpc_timeout_sec(default: int = 10) -> int:
-    """
-    Таймаут именно RPC-вызова (server-side + network).
-    """
     try:
         return int(getattr(settings, "xray_rpc_timeout_sec", default))
     except Exception:
@@ -134,10 +192,6 @@ def _rpc_timeout_sec(default: int = 10) -> int:
 
 
 def _connect_ready_timeout_sec(default: float = 2.0) -> float:
-    """
-    Таймаут ожидания "канал готов" (channel_ready_future).
-    Это отдельная защита от зависаний grpcio при проблемном соединении.
-    """
     try:
         return float(getattr(settings, "xray_connect_ready_timeout_sec", default))
     except Exception:
@@ -159,9 +213,6 @@ def _grpc_channel_options() -> list[tuple[str, int]]:
 
 
 def _reset_channel_locked() -> None:
-    """
-    Сброс channel и stub-ов (вызывать только под _lock).
-    """
     global _channel, _handler_stub, _stats_stub
     _channel = None
     _handler_stub = None
@@ -169,75 +220,60 @@ def _reset_channel_locked() -> None:
 
 
 def _get_or_create_channel_locked() -> grpc.Channel:
-    """
-    Получить или создать gRPC channel (вызывать только под _lock).
-    """
     global _channel
     if _channel is None:
         _channel = grpc.insecure_channel(settings.xray_api_addr, options=_grpc_channel_options())
+        log.info("xray channel created addr=%s", settings.xray_api_addr)
     return _channel
 
 
 def _ensure_channel_ready() -> None:
-    """
-    Гарантирует, что gRPC канал готов.
-
-    Главная причина "вечного running":
-    grpcio может "залипнуть" на полуживом соединении (особенно после рестарта Xray).
-    В этом случае мы:
-      1) ждём готовность канала короткое время
-      2) если не готов — пересоздаём channel/stubs
-      3) ждём ещё раз
-
-    Если и после пересоздания не готов — выбрасываем исключение.
-    """
     if XRAY_MOCK:
         return
 
     ready_timeout = _connect_ready_timeout_sec()
+    log.debug("xray ensure_channel_ready addr=%s ready_timeout=%.2f", settings.xray_api_addr, ready_timeout)
 
     with _lock:
         ch = _get_or_create_channel_locked()
 
-        # Попытка №1
+        # attempt #1
         try:
             grpc.channel_ready_future(ch).result(timeout=ready_timeout)
             return
-        except Exception:
-            # Пересоздаём и пробуем ещё раз
+        except Exception as e:
+            log.warning(
+                "xray channel not ready (attempt1) addr=%s err=%s",
+                settings.xray_api_addr,
+                str(e)[:300],
+            )
             _reset_channel_locked()
             ch = _get_or_create_channel_locked()
 
-        # Попытка №2 (после reset)
+        # attempt #2
+        log.debug("xray ensure_channel_ready retry addr=%s", settings.xray_api_addr)
         grpc.channel_ready_future(ch).result(timeout=ready_timeout)
 
 
 def _get_handler_stub() -> proxyman_cmd_pb2_grpc.HandlerServiceStub:
-    """
-    HandlerServiceStub (AlterInbound, GetInboundUsers...).
-    """
     global _handler_stub
     with _lock:
         if _handler_stub is None:
             _handler_stub = proxyman_cmd_pb2_grpc.HandlerServiceStub(_get_or_create_channel_locked())
+            log.info("xray handler stub created addr=%s", settings.xray_api_addr)
         return _handler_stub
 
 
 def _get_stats_stub() -> stats_cmd_pb2_grpc.StatsServiceStub:
-    """
-    StatsServiceStub (GetSysStats).
-    """
     global _stats_stub
     with _lock:
         if _stats_stub is None:
             _stats_stub = stats_cmd_pb2_grpc.StatsServiceStub(_get_or_create_channel_locked())
+            log.info("xray stats stub created addr=%s", settings.xray_api_addr)
         return _stats_stub
 
 
 def _raise_grpc_error(e: grpc.RpcError, *, context: str) -> None:
-    """
-    Нормализуем gRPC ошибку в RuntimeError с контекстом.
-    """
     code = e.code() if hasattr(e, "code") else None
     details = e.details() if hasattr(e, "details") else str(e)
     raise RuntimeError(f"grpcio failed ({context}): code={code} details={details}") from e
@@ -247,28 +283,28 @@ def _raise_grpc_error(e: grpc.RpcError, *, context: str) -> None:
 # Public API
 # =============================================================================
 def xray_api_sys_stats() -> Dict[str, Any]:
-    """
-    GetSysStats — главный health-сигнал.
-    """
     if XRAY_MOCK:
         return {"mock": True, "sys_stats": {}}
 
     try:
-        _ensure_channel_ready()
-        stub = _get_stats_stub()
-        req = stats_cmd_pb2.SysStatsRequest()
-        resp = stub.GetSysStats(req, timeout=_rpc_timeout_sec())
-        return _pb_to_dict(resp)
+        with _rpc_log_ctx("GetSysStats", addr=settings.xray_api_addr):
+            _ensure_channel_ready()
+            stub = _get_stats_stub()
+            req = stats_cmd_pb2.SysStatsRequest()
+            resp = stub.GetSysStats(req, timeout=_rpc_timeout_sec())
+            data = _pb_to_dict(resp)
+            log.info(
+                "xray GetSysStats response addr=%s keys=%s",
+                settings.xray_api_addr,
+                list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+            )
+            return data
     except grpc.RpcError as e:
+        log.error("xray grpc error GetSysStats addr=%s info=%s", settings.xray_api_addr, _grpc_err_info(e))
         _raise_grpc_error(e, context="GetSysStats")
 
 
 def xray_runtime_status() -> Dict[str, Any]:
-    """
-    Быстрый статус Xray:
-    - открывается ли TCP порт API
-    - получается ли GetSysStats
-    """
     host, port = parse_hostport(settings.xray_api_addr)
     port_open = is_tcp_open(host, port)
 
@@ -288,6 +324,7 @@ def xray_runtime_status() -> Dict[str, Any]:
     if not port_open:
         st["ok"] = False
         st["error"] = "Xray API port is not open"
+        log.warning("xray runtime_status port closed addr=%s", settings.xray_api_addr)
         return st
 
     try:
@@ -295,18 +332,12 @@ def xray_runtime_status() -> Dict[str, Any]:
         st["ok"] = True
     except Exception as e:
         st["ok"] = False
-        # тут можно отдавать str(e) (для дебага), а можно скрывать
-        st["xray_api_sys_stats_error"] = str(e)
+        st["xray_api_sys_stats_error"] = str(e)[:500]
 
     return st
 
 
 def add_client(user_uuid: str, email: str, inbound_tag: str, level: int = 0, flow: str = "") -> Dict[str, Any]:
-    """
-    Добавить пользователя в inbound через AlterInbound + AddUserOperation.
-
-    Совместимость: как раньше, возвращаем dict (_pb_to_dict(resp)) или {}.
-    """
     if XRAY_MOCK:
         return {
             "mock": True,
@@ -319,23 +350,51 @@ def add_client(user_uuid: str, email: str, inbound_tag: str, level: int = 0, flo
         }
 
     try:
-        _ensure_channel_ready()
-        op_tm = _build_add_user_operation_typed(user_uuid=user_uuid, email=email, level=int(level), flow=flow)
-        req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
-        resp = _get_handler_stub().AlterInbound(req, timeout=_rpc_timeout_sec())
-        try:
-            return _pb_to_dict(resp)  # часто {}
-        except Exception:
-            return {}
+        with _rpc_log_ctx(
+            "AlterInbound(AddUser)",
+            addr=settings.xray_api_addr,
+            inbound_tag=inbound_tag,
+            email=_mask(email),
+            uuid=_mask(user_uuid),
+            level=int(level),
+            flow=flow or "",
+        ):
+            _ensure_channel_ready()
+            op_tm = _build_add_user_operation_typed(user_uuid=user_uuid, email=email, level=int(level), flow=flow)
+            req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
+
+            resp = _get_handler_stub().AlterInbound(req, timeout=_rpc_timeout_sec())
+            try:
+                data = _pb_to_dict(resp)  # часто {}
+                log.info(
+                    "xray AlterInbound(AddUser) response addr=%s tag=%s email=%s resp_keys=%s",
+                    settings.xray_api_addr,
+                    inbound_tag,
+                    _mask(email),
+                    list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                )
+                return data
+            except Exception as e:
+                log.warning(
+                    "xray pb_to_dict failed AlterInbound(AddUser) addr=%s tag=%s email=%s err=%s",
+                    settings.xray_api_addr,
+                    inbound_tag,
+                    _mask(email),
+                    str(e)[:300],
+                )
+                return {}
     except grpc.RpcError as e:
+        log.error(
+            "xray grpc error AlterInbound(AddUser) addr=%s tag=%s email=%s info=%s",
+            settings.xray_api_addr,
+            inbound_tag,
+            _mask(email),
+            _grpc_err_info(e),
+        )
         _raise_grpc_error(e, context=f"AlterInbound(AddUser) tag={inbound_tag} email={email}")
 
+
 def _is_user_not_found(e: grpc.RpcError) -> bool:
-    """
-    Xray часто возвращает StatusCode.UNKNOWN, но текст details содержит:
-    'proxy/vless: User <email> not found.'
-    Поэтому проверяем по details().
-    """
     try:
         details = (e.details() or "").lower()
     except Exception:
@@ -343,29 +402,50 @@ def _is_user_not_found(e: grpc.RpcError) -> bool:
 
     return ("not found" in details) and ("user" in details)
 
-def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
-    """
-    Удалить пользователя из inbound по email.
 
-    ВАЖНО (идемпотентность):
-    Если пользователь уже отсутствует в Xray ("User ... not found") — это НЕ ошибка,
-    а желаемое состояние. Возвращаем ok/skipped.
-    """
+def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
     if XRAY_MOCK:
         return {"mock": True, "action": "remove", "email": email, "inbound_tag": inbound_tag}
 
     try:
-        _ensure_channel_ready()
-        op_tm = _build_remove_user_operation_typed(email=email)
-        req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
-        resp = _get_handler_stub().AlterInbound(req, timeout=_rpc_timeout_sec())
-        try:
-            return _pb_to_dict(resp)
-        except Exception:
-            return {}
+        with _rpc_log_ctx(
+            "AlterInbound(RemoveUser)",
+            addr=settings.xray_api_addr,
+            inbound_tag=inbound_tag,
+            email=_mask(email),
+        ):
+            _ensure_channel_ready()
+            op_tm = _build_remove_user_operation_typed(email=email)
+            req = proxyman_cmd_pb2.AlterInboundRequest(tag=inbound_tag, operation=op_tm)
+
+            resp = _get_handler_stub().AlterInbound(req, timeout=_rpc_timeout_sec())
+            try:
+                data = _pb_to_dict(resp)
+                log.info(
+                    "xray AlterInbound(RemoveUser) response addr=%s tag=%s email=%s resp_keys=%s",
+                    settings.xray_api_addr,
+                    inbound_tag,
+                    _mask(email),
+                    list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                )
+                return data
+            except Exception as e:
+                log.warning(
+                    "xray pb_to_dict failed AlterInbound(RemoveUser) addr=%s tag=%s email=%s err=%s",
+                    settings.xray_api_addr,
+                    inbound_tag,
+                    _mask(email),
+                    str(e)[:300],
+                )
+                return {}
     except grpc.RpcError as e:
-        # ✅ user not found => считаем успехом
         if _is_user_not_found(e):
+            log.info(
+                "xray remove skipped (user not found) addr=%s tag=%s email=%s",
+                settings.xray_api_addr,
+                inbound_tag,
+                _mask(email),
+            )
             return {
                 "ok": True,
                 "skipped": True,
@@ -374,48 +454,98 @@ def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
                 "inbound_tag": str(inbound_tag),
             }
 
+        log.error(
+            "xray grpc error AlterInbound(RemoveUser) addr=%s tag=%s email=%s info=%s",
+            settings.xray_api_addr,
+            inbound_tag,
+            _mask(email),
+            _grpc_err_info(e),
+        )
         _raise_grpc_error(e, context=f"AlterInbound(RemoveUser) tag={inbound_tag} email={email}")
-
 
 
 def inbound_users(tag: str) -> Dict[str, Any]:
     """
-    Получить список пользователей inbound (сырые данные).
-    По твоему proto используется GetInboundUserRequest(tag=..., email="") для list.
+    Получить список пользователей inbound.
+    Поддержка разных версий proto:
+      - GetInboundUsersRequest(tag=...)
+      - fallback: GetInboundUserRequest(tag=..., email="")
     """
     if XRAY_MOCK:
         return {"users": []}
 
     try:
-        _ensure_channel_ready()
-        req = proxyman_cmd_pb2.GetInboundUserRequest(tag=tag, email="")
-        resp = _get_handler_stub().GetInboundUsers(req, timeout=_rpc_timeout_sec())
-        return _pb_to_dict(resp)
+        with _rpc_log_ctx("GetInboundUsers", addr=settings.xray_api_addr, inbound_tag=tag):
+            _ensure_channel_ready()
+            stub = _get_handler_stub()
+
+            if hasattr(proxyman_cmd_pb2, "GetInboundUsersRequest"):
+                log.info("xray GetInboundUsers using GetInboundUsersRequest addr=%s tag=%s", settings.xray_api_addr, tag)
+                req = proxyman_cmd_pb2.GetInboundUsersRequest(tag=tag)
+            else:
+                log.info("xray GetInboundUsers using GetInboundUserRequest(email='') addr=%s tag=%s", settings.xray_api_addr, tag)
+                req = proxyman_cmd_pb2.GetInboundUserRequest(tag=tag, email="")
+
+            resp = stub.GetInboundUsers(req, timeout=_rpc_timeout_sec())
+            data = _pb_to_dict(resp)
+
+            users = data.get("users") if isinstance(data, dict) else None
+            cnt = len(users) if isinstance(users, list) else None
+            log.info(
+                "xray GetInboundUsers response addr=%s tag=%s users_count=%s keys=%s",
+                settings.xray_api_addr,
+                tag,
+                cnt,
+                list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+            )
+
+            return data
+
     except grpc.RpcError as e:
+        log.error("xray grpc error GetInboundUsers addr=%s tag=%s info=%s", settings.xray_api_addr, tag, _grpc_err_info(e))
         _raise_grpc_error(e, context=f"GetInboundUsers tag={tag}")
 
 
 def inbound_users_count(tag: str) -> int:
     """
     Количество пользователей inbound.
-    Возвращаем int (нормализовано), чтобы API всегда отдавал число.
+    Поддержка разных версий proto.
     """
     if XRAY_MOCK:
         return 0
 
     try:
-        _ensure_channel_ready()
-        req = proxyman_cmd_pb2.GetInboundUserRequest(tag=tag, email="")
-        resp = _get_handler_stub().GetInboundUsersCount(req, timeout=_rpc_timeout_sec())
-        data: Dict[str, Any] = _pb_to_dict(resp)
-        raw = data.get("count", 0)
+        with _rpc_log_ctx("GetInboundUsersCount", addr=settings.xray_api_addr, inbound_tag=tag):
+            _ensure_channel_ready()
+            stub = _get_handler_stub()
 
-        # protobuf/json_format может вернуть str или int — нормализуем
-        try:
-            return int(raw)
-        except Exception:
-            return 0
+            if hasattr(proxyman_cmd_pb2, "GetInboundUsersRequest"):
+                log.info("xray GetInboundUsersCount using GetInboundUsersRequest addr=%s tag=%s", settings.xray_api_addr, tag)
+                req = proxyman_cmd_pb2.GetInboundUsersRequest(tag=tag)
+            else:
+                log.info("xray GetInboundUsersCount using GetInboundUserRequest(email='') addr=%s tag=%s", settings.xray_api_addr, tag)
+                req = proxyman_cmd_pb2.GetInboundUserRequest(tag=tag, email="")
+
+            resp = stub.GetInboundUsersCount(req, timeout=_rpc_timeout_sec())
+            data: Dict[str, Any] = _pb_to_dict(resp)
+            raw = data.get("count", 0)
+
+            try:
+                val = int(raw)
+            except Exception:
+                val = 0
+
+            log.info(
+                "xray GetInboundUsersCount response addr=%s tag=%s raw=%r parsed=%d",
+                settings.xray_api_addr,
+                tag,
+                raw,
+                val,
+            )
+            return val
+
     except grpc.RpcError as e:
+        log.error("xray grpc error GetInboundUsersCount addr=%s tag=%s info=%s", settings.xray_api_addr, tag, _grpc_err_info(e))
         _raise_grpc_error(e, context=f"GetInboundUsersCount tag={tag}")
 
 
@@ -429,6 +559,7 @@ def inbound_emails(tag: str) -> list[str]:
     for u in users:
         if isinstance(u, dict) and u.get("email"):
             out.append(str(u["email"]))
+    log.info("xray inbound_emails addr=%s tag=%s count=%d", settings.xray_api_addr, tag, len(out))
     return out
 
 
@@ -462,4 +593,5 @@ def inbound_uuids(tag: str) -> list[str]:
         except Exception:
             continue
 
+    log.info("xray inbound_uuids addr=%s tag=%s count=%d", settings.xray_api_addr, tag, len(out))
     return out
