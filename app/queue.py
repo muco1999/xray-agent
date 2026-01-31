@@ -13,7 +13,10 @@ JOB_KEY_PREFIX = "xray_job:"
 IDEMPOTENCY_PREFIX = "xray_idem:"
 
 JOB_TTL_SEC = 3600
-IDEMPOTENCY_TTL_SEC = 3600
+
+# ✅ важно: idempotency для issue должна жить 60–120 сек
+# чтобы защитить от повторного клика, но не ломать повторный issue после remove
+IDEMPOTENCY_TTL_SEC = 90
 
 
 def _job_key(job_id: str) -> str:
@@ -27,6 +30,7 @@ def _idem_key(idem_hash: str) -> str:
 def _now() -> int:
     return int(time.time())
 
+
 def _normalize_error(err: Any) -> Optional[str]:
     if err is None:
         return None
@@ -38,26 +42,25 @@ def _normalize_error(err: Any) -> Optional[str]:
         return str(err)
 
 
+# =========================================================
+# Job state
+# =========================================================
+
 async def set_job_state(
     job_id: str,
     state: str,
     *,
     result: Optional[Dict[str, Any]] = None,
-    error: Optional[Any] = None,   # ← ВАЖНО
+    error: Optional[Any] = None,
 ) -> None:
     doc = {
         "id": job_id,
         "state": state,
         "ts": _now(),
         "result": result,
-        "error": _normalize_error(error),  # ← ВАЖНО
+        "error": _normalize_error(error),
     }
-    await r.set(
-        _job_key(job_id),
-        json.dumps(doc, ensure_ascii=False),
-        ex=JOB_TTL_SEC,
-    )
-
+    await r.set(_job_key(job_id), json.dumps(doc, ensure_ascii=False), ex=JOB_TTL_SEC)
 
 
 async def get_job_state(job_id: str) -> Dict[str, Any]:
@@ -66,6 +69,10 @@ async def get_job_state(job_id: str) -> Dict[str, Any]:
         return {"id": job_id, "state": "not_found"}
     return json.loads(raw)
 
+
+# =========================================================
+# Non-idempotent enqueue
+# =========================================================
 
 async def enqueue_job(kind: str, payload: Dict[str, Any]) -> str:
     """
@@ -76,7 +83,6 @@ async def enqueue_job(kind: str, payload: Dict[str, Any]) -> str:
     """
     job_id = str(uuid.uuid4())
     job = {"id": job_id, "kind": kind, "payload": payload, "ts": _now()}
-
     state_doc = {"id": job_id, "state": "queued", "ts": _now(), "result": None, "error": None}
 
     async with r.pipeline(transaction=True) as pipe:
@@ -87,9 +93,40 @@ async def enqueue_job(kind: str, payload: Dict[str, Any]) -> str:
     return job_id
 
 
+# =========================================================
+# Issue idempotency (dedupe)
+# =========================================================
+
+def _normalize_inbound_tag(tag: Optional[str]) -> str:
+    t = str(tag or "").strip()
+    return t or "vless-in"
+
+
 def _make_issue_idempotency_hash(telegram_id: str, inbound_tag: str) -> str:
     base = f"{telegram_id.strip()}|{inbound_tag.strip()}"
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
+
+
+async def clear_issue_dedupe_cache(*, telegram_id: str, inbound_tag: str) -> int:
+    """
+    ✅ Чистит dedupe/idempotency ключ issue_client.
+
+    ВАЖНО:
+      У тебя dedupe реализован как: xray_idem:<sha256(telegram_id|inbound_tag)>
+      Поэтому никакого SCAN тут не нужно и быть не должно.
+      Один ключ -> один delete.
+    """
+    tg = str(telegram_id).strip()
+    tag = _normalize_inbound_tag(inbound_tag)
+
+    if not tg:
+        return 0
+
+    idem_hash = _make_issue_idempotency_hash(tg, tag)
+    key = _idem_key(idem_hash)
+
+    deleted = await r.delete(key)
+    return int(deleted or 0)
 
 
 async def enqueue_issue_job(req_model_dump: Dict[str, Any]) -> Tuple[str, bool]:
@@ -102,21 +139,20 @@ async def enqueue_issue_job(req_model_dump: Dict[str, Any]) -> Tuple[str, bool]:
       - статус + enqueue делаем pipeline
     """
     telegram_id = str(req_model_dump["telegram_id"]).strip()
-    inbound_tag = str(req_model_dump.get("inbound_tag") or "").strip() or "vless-in"
+    inbound_tag = _normalize_inbound_tag(req_model_dump.get("inbound_tag"))
 
     idem_hash = _make_issue_idempotency_hash(telegram_id, inbound_tag)
     idem_key = _idem_key(idem_hash)
 
     job_id = str(uuid.uuid4())
 
-    # 1) пробуем выставить idem указатель атомарно (NX)
+    # ✅ idem живет недолго
     ok = await r.set(idem_key, job_id, ex=IDEMPOTENCY_TTL_SEC, nx=True)
     if not ok:
-        # уже существует => вернуть существующий job_id
         existing = await r.get(idem_key)
         if existing:
             return str(existing), True
-        # редкий случай: ключ исчез между операциями — продолжаем как новый
+        # редкий race: ключ исчез — продолжаем как новый
 
     job = {"id": job_id, "kind": "issue_client", "payload": req_model_dump, "ts": _now()}
     state_doc = {"id": job_id, "state": "queued", "ts": _now(), "result": None, "error": None}

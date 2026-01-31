@@ -29,7 +29,7 @@ from app.config import settings
 from app.models import JobEnqueueResponse, IssueClientRequest, JobStatusResponse
 
 # async queue
-from app.queue import enqueue_job, enqueue_issue_job, get_job_state
+from app.queue import enqueue_job, enqueue_issue_job, get_job_state, clear_issue_dedupe_cache
 
 # sync grpcio adapter
 from app.xray import xray_runtime_status, remove_client, inbound_users_count, inbound_emails
@@ -242,6 +242,19 @@ async def api_remove_client(
     # sync path (still blocking grpcio)
     try:
         result = await run_in_threadpool(lambda: remove_client(email=email, inbound_tag=inbound_tag))
+
+        # ✅ очищаем dedupe после удаления
+        try:
+            n = await clear_issue_dedupe_cache(telegram_id=email, inbound_tag=inbound_tag)
+            log.info(f"[CACHE] cleared issue dedupe keys={n} email={email} tag={inbound_tag}")
+        except Exception as e:
+            log.error(f"[CACHE] clear dedupe failed email={email} tag={inbound_tag} err={str(e)[:200]}")
+
+        return {"result": result, "request_id": request.state.request_id}
+
+
+
+
         return {"result": result, "request_id": request.state.request_id}
     except Exception as e:
         log.exception("remove_client failed", extra={"email": email, "tag": inbound_tag, "request_id": request.state.request_id})

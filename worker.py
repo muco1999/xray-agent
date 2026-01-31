@@ -13,7 +13,7 @@ import httpx
 
 from app.config import settings
 from app.redis_client import r
-from app.queue import QUEUE_KEY, set_job_state
+from app.queue import QUEUE_KEY, set_job_state, clear_issue_dedupe_cache
 from app.xray import add_client, remove_client
 
 log = logging.getLogger("xray-agent-worker")
@@ -147,7 +147,19 @@ async def handle(job: dict) -> dict:
     if kind == "remove_client":
         email = _require_field(payload, "email")
         inbound_tag = _require_field(payload, "inbound_tag")
-        return await _to_thread(remove_client, email, inbound_tag)
+        res = await _to_thread(remove_client, email, inbound_tag)
+
+        # ✅ очистка кеша
+        try:
+            n = await clear_issue_dedupe_cache(telegram_id=email, inbound_tag=inbound_tag)
+            log.info(f"[CACHE] cleared issue dedupe keys={n} email={email} tag={inbound_tag}")
+        except Exception as e:
+            log.error(f"[CACHE] clear dedupe failed email={email} tag={inbound_tag} err={str(e)[:200]}")
+
+        return {"removed": res, "cache_cleared": True}
+
+
+
 
     if kind == "issue_client":
         telegram_id = str(_require_field(payload, "telegram_id")).strip()
