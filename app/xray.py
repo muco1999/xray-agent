@@ -330,10 +330,26 @@ def add_client(user_uuid: str, email: str, inbound_tag: str, level: int = 0, flo
     except grpc.RpcError as e:
         _raise_grpc_error(e, context=f"AlterInbound(AddUser) tag={inbound_tag} email={email}")
 
+def _is_user_not_found(e: grpc.RpcError) -> bool:
+    """
+    Xray часто возвращает StatusCode.UNKNOWN, но текст details содержит:
+    'proxy/vless: User <email> not found.'
+    Поэтому проверяем по details().
+    """
+    try:
+        details = (e.details() or "").lower()
+    except Exception:
+        details = str(e).lower()
+
+    return ("not found" in details) and ("user" in details)
 
 def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
     """
     Удалить пользователя из inbound по email.
+
+    ВАЖНО (идемпотентность):
+    Если пользователь уже отсутствует в Xray ("User ... not found") — это НЕ ошибка,
+    а желаемое состояние. Возвращаем ok/skipped.
     """
     if XRAY_MOCK:
         return {"mock": True, "action": "remove", "email": email, "inbound_tag": inbound_tag}
@@ -348,7 +364,18 @@ def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
         except Exception:
             return {}
     except grpc.RpcError as e:
+        # ✅ user not found => считаем успехом
+        if _is_user_not_found(e):
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "user not found",
+                "email": str(email),
+                "inbound_tag": str(inbound_tag),
+            }
+
         _raise_grpc_error(e, context=f"AlterInbound(RemoveUser) tag={inbound_tag} email={email}")
+
 
 
 def inbound_users(tag: str) -> Dict[str, Any]:
