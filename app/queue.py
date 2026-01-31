@@ -27,22 +27,37 @@ def _idem_key(idem_hash: str) -> str:
 def _now() -> int:
     return int(time.time())
 
+def _normalize_error(err: Any) -> Optional[str]:
+    if err is None:
+        return None
+    if isinstance(err, str):
+        return err
+    try:
+        return json.dumps(err, ensure_ascii=False, default=str)
+    except Exception:
+        return str(err)
+
 
 async def set_job_state(
     job_id: str,
     state: str,
     *,
     result: Optional[Dict[str, Any]] = None,
-    error: Optional[Dict[str, Any]] = None,
+    error: Optional[Any] = None,   # ← ВАЖНО
 ) -> None:
     doc = {
         "id": job_id,
         "state": state,
         "ts": _now(),
         "result": result,
-        "error": error,
+        "error": _normalize_error(error),  # ← ВАЖНО
     }
-    await r.set(_job_key(job_id), json.dumps(doc, ensure_ascii=False), ex=JOB_TTL_SEC)
+    await r.set(
+        _job_key(job_id),
+        json.dumps(doc, ensure_ascii=False),
+        ex=JOB_TTL_SEC,
+    )
+
 
 
 async def get_job_state(job_id: str) -> Dict[str, Any]:

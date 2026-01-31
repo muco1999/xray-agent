@@ -47,7 +47,7 @@ def build_vless_link(user_uuid: str, email: str, flow: str) -> str:
     return (
         f"vless://{user_uuid}@{settings.public_host}:{port}"
         f"?encryption=none"
-        f"{flow_q}"
+        # f"{flow_q}"
         f"&security=reality"
         f"&sni={settings.reality_sni}"
         f"&fp={fp}"
