@@ -7,8 +7,10 @@ WORKDIR /srv
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates bash tar \
-    && rm -rf /var/lib/apt/lists/*
+    iproute2 \
+  && rm -rf /var/lib/apt/lists/*
 
+# grpcurl
 RUN set -eux; \
     ARCH="$(dpkg --print-architecture)"; \
     case "$ARCH" in \
