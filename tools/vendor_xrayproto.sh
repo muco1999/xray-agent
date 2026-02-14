@@ -46,7 +46,7 @@ for d in app common core proxy transport features infra; do
 done
 
 echo "[6/7] Add __init__.py everywhere (packages)"
-find "${OUT_DIR}" -type d -exec sh -lc 'test -f "$1/__init__.py" || : > "$1/__init__.py"' sh {} \;
+find "${OUT_DIR}" -type d -exec sh -lc 'tests -f "$1/__init__.py" || : > "$1/__init__.py"' sh {} \;
 
 echo "[7/7] Patch imports inside *_pb2*.py to use xrayproto.* namespace"
 python - <<'PY'

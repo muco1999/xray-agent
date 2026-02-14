@@ -1,6 +1,17 @@
 from fastapi import Header, HTTPException
 from app.config import settings
 from app.models import IssueClientRequest
+import json
+import time
+import uuid
+import hashlib
+from typing import Tuple
+
+
+
+QUEUE_KEY = "xray:jobs:queue"
+JOB_KEY_PREFIX = "xray:jobs:"
+IDEMPOTENCY_PREFIX = "xray:idem:"
 
 
 def require_token(authorization: str | None = Header(default=None)):
@@ -16,23 +27,6 @@ def require_token(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
     return True
-
-
-
-
-
-
-import json
-import time
-import uuid
-import hashlib
-from typing import Tuple
-
-
-QUEUE_KEY = "xray:jobs:queue"
-JOB_KEY_PREFIX = "xray:jobs:"
-IDEMPOTENCY_PREFIX = "xray:idem:"
-
 
 def _job_key(job_id: str) -> str:
     return f"{JOB_KEY_PREFIX}{job_id}"

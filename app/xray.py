@@ -282,7 +282,7 @@ def _raise_grpc_error(e: grpc.RpcError, *, context: str) -> None:
 # =============================================================================
 # Public API
 # =============================================================================
-def xray_api_sys_stats() -> Dict[str, Any]:
+def xray_api_sys_stats() -> Dict[str, Any] | None:
     if XRAY_MOCK:
         return {"mock": True, "sys_stats": {}}
 
@@ -403,7 +403,7 @@ def _is_user_not_found(e: grpc.RpcError) -> bool:
     return ("not found" in details) and ("user" in details)
 
 
-def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
+def remove_client(email: str, inbound_tag: str) -> Dict[str, Any] | None:
     if XRAY_MOCK:
         return {"mock": True, "action": "remove", "email": email, "inbound_tag": inbound_tag}
 
@@ -464,7 +464,7 @@ def remove_client(email: str, inbound_tag: str) -> Dict[str, Any]:
         _raise_grpc_error(e, context=f"AlterInbound(RemoveUser) tag={inbound_tag} email={email}")
 
 
-def inbound_users(tag: str) -> Dict[str, Any]:
+def inbound_users(tag: str) -> Dict[str, Any] | None:
     """
     Получить список пользователей inbound.
     Поддержка разных версий proto:
@@ -506,7 +506,7 @@ def inbound_users(tag: str) -> Dict[str, Any]:
         _raise_grpc_error(e, context=f"GetInboundUsers tag={tag}")
 
 
-def inbound_users_count(tag: str) -> int:
+def inbound_users_count(tag: str) -> int | None:
     """
     Количество пользователей inbound.
     Поддержка разных версий proto.
