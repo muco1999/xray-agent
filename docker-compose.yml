@@ -17,6 +17,7 @@ services:
       - .env
     command: ["python", "-m", "uvicorn", "app.main:app", "--host", "${API_BIND_HOST}", "--port", "${API_BIND_PORT}"]
     volumes:
+      - /var/log/xray/access.log:/var/log/xray/access.log:ro
       - /etc/localtime:/etc/localtime:ro
 
   xray-agent-worker:
