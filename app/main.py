@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from app.andpoints.endpoints_status_xray_clients import router as router_status_xray_clients
 from app.andpoints.endpoints_work_clients import router as router_work_clients
+from app.andpoints.api_restore import router as router_api_restore
 
 import uuid
 
@@ -55,6 +56,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 app.include_router(router_status_xray_clients)
 app.include_router(router_work_clients)
+app.include_router(router_api_restore)
 
 
 
