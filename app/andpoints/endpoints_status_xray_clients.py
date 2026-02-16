@@ -25,11 +25,15 @@ XRAY_INBOUND_TAG = os.getenv("XRAY_INBOUND_TAG", "vless-in")
 WINDOW_SEC = int(os.getenv("WINDOW_SEC", str(10 * 60)))
 ONLINE_WINDOW_SEC = int(os.getenv("ONLINE_WINDOW_SEC", "240"))
 DEVICES_LIMIT = int(os.getenv("DEVICES_LIMIT", "2"))
+IP_ACTIVE_TTL_SEC = int(os.getenv("IP_ACTIVE_TTL_SEC", "120"))
 
 ACCESS_LOG_PATH = os.getenv("XRAY_ACCESS_LOG", "/var/log/xray/access.log")
 
 TAIL_MAX_LINES = int(os.getenv("TAIL_MAX_LINES", "30000"))  # сколько последних строк читаем
 CACHE_TTL_SEC = float(os.getenv("CACHE_TTL_SEC", "2.0"))
+
+
+
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logger = logging.getLogger("xray_status")
@@ -148,15 +152,18 @@ def parse_xray_access_lines(lines: List[str], inbound_tag: str) -> List[Dict[str
 # -----------------------------------------------------------------------------
 # 📊 Агрегация
 # -----------------------------------------------------------------------------
-def aggregate_status(events: List[Dict[str, Any]], now: float, online_window_sec: int, devices_limit: int) -> Dict[str, Any]:
-    per_email_ips: Dict[str, set] = defaultdict(set)
+def aggregate_status(events, now, online_window_sec, devices_limit, ip_active_ttl_sec):
+    per_email_ip_last: Dict[str, Dict[str, float]] = defaultdict(dict)
     per_email_last: Dict[str, float] = defaultdict(float)
     per_email_hosts: Dict[str, Counter] = defaultdict(Counter)
     per_email_events: Dict[str, int] = defaultdict(int)
 
     for e in events:
         email = e["email"]
-        per_email_ips[email].add(e["src_ip"])
+        ip = e["src_ip"]
+        prev = per_email_ip_last[email].get(ip, 0.0)
+        if e["t"] > prev:
+            per_email_ip_last[email][ip] = e["t"]
         per_email_last[email] = max(per_email_last[email], e["t"])
         per_email_hosts[email][e["host"]] += 1
         per_email_events[email] += 1
@@ -165,13 +172,15 @@ def aggregate_status(events: List[Dict[str, Any]], now: float, online_window_sec
     online_count = 0
     suspicious_count = 0
 
-    for email, ips in per_email_ips.items():
+    for email, ip_last in per_email_ip_last.items():
         last_seen = per_email_last[email]
         online = (now - last_seen) <= online_window_sec
         if online:
             online_count += 1
 
-        devices = len(ips)
+        active_ips = {ip for ip, t in ip_last.items() if (now - t) <= ip_active_ttl_sec}
+        devices = len(active_ips)
+
         suspicious = devices > devices_limit
         if suspicious:
             suspicious_count += 1
@@ -183,7 +192,7 @@ def aggregate_status(events: List[Dict[str, Any]], now: float, online_window_sec
                 "last_seen_epoch": last_seen,
                 "last_seen_iso_utc": _epoch_to_iso(last_seen),
                 "last_seen_ago_sec": round(max(0.0, now - last_seen), 3),
-                "unique_ips": sorted(ips),
+                "unique_ips": sorted(active_ips),
                 "devices_estimate": devices,
                 "events": per_email_events[email],
                 "top_hosts": [{"host": h, "hits": c} for h, c in per_email_hosts[email].most_common(8)],
@@ -195,7 +204,7 @@ def aggregate_status(events: List[Dict[str, Any]], now: float, online_window_sec
 
     return {
         "window_events": len(events),
-        "clients_total_seen": len(per_email_ips),
+        "clients_total_seen": len(per_email_ip_last),
         "clients_online": online_count,
         "suspicious_clients": suspicious_count,
         "clients": clients,
@@ -235,7 +244,7 @@ async def build_xray_status_snapshot() -> Dict[str, Any]:
         cutoff = now2 - WINDOW_SEC
         events = [e for e in events if e["t"] >= cutoff]
 
-        agg = await run_in_threadpool(aggregate_status, events, now2, ONLINE_WINDOW_SEC, DEVICES_LIMIT)
+        agg = await run_in_threadpool(aggregate_status, events, now2, ONLINE_WINDOW_SEC, DEVICES_LIMIT, IP_ACTIVE_TTL_SEC)
         est_443 = await get_established_443_count()
 
         dur_ms = int((time.time() - t0) * 1000)
