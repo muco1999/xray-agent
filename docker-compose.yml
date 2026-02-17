@@ -34,42 +34,42 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    ports:
+      - "127.0.0.1:6379:6379"
     logging:
       driver: "json-file"
       options:
         max-size: "20m"
         max-file: "3"
 
-  # ✅ единственный билд
   xray-agent-api:
     <<: *common
     build: .
     container_name: xray-agent-api
+    network_mode: "host"
     environment:
-      REDIS_HOST: redis
+      REDIS_HOST: "127.0.0.1"
       REDIS_PORT: "6379"
-    ports:
-      - "${API_BIND_HOST:-0.0.0.0}:${API_BIND_PORT:-18000}:18000"
     command: >
       python -m uvicorn app.main:app
       --host 0.0.0.0
       --port 18000
 
-  # ✅ только image, без build
   xray-agent-worker:
     <<: *common
     container_name: xray-agent-worker
+    network_mode: "host"
     environment:
-      REDIS_HOST: redis
+      REDIS_HOST: "127.0.0.1"
       REDIS_PORT: "6379"
     command: ["python", "worker.py"]
 
-  # ✅ только image, без build
   xray-guard:
     <<: *common
     container_name: xray-guard
+    network_mode: "host"
     environment:
-      REDIS_HOST: redis
+      REDIS_HOST: "127.0.0.1"
       REDIS_PORT: "6379"
     command: ["python", "-m", "app.workers.xray_guard.main"]
 
