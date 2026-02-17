@@ -1,6 +1,9 @@
 """
 FastAPI entrypoint for Xray Agent API (production async).
 
+endpoints_work_clients.py
+
+
 Features:
 - async endpoints
 - sync/blocking upstream calls (grpcio) executed via threadpool
@@ -21,10 +24,14 @@ from fastapi import Query, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from starlette import status
 
-from app.andpoints.logger import log
+from app.logger import log
+
+
 from app.andpoints.tools import api_error, _safe_upstream_detail
 from app.auth import require_token
-from app.config import settings
+from app.settings import settings
+
+
 from app.models import JobEnqueueResponse, IssueClientRequest, JobStatusResponse
 
 # async queue

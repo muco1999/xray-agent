@@ -13,7 +13,8 @@ from __future__ import annotations
 from typing import Optional, Literal, Any, Dict
 from pydantic import BaseModel, Field, field_validator
 
-from app.config import settings
+from app.settings import settings
+
 
 
 class IssueClientRequest(BaseModel):

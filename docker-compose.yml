@@ -20,16 +20,32 @@ services:
       - /var/log/xray:/var/log/xray:ro
       - /etc/localtime:/etc/localtime:ro
 
-  xray-agent-worker:
+  xray-guard:
+    container_name: xray_guard_worker
     build: .
-    container_name: xray-agent-worker
     restart: unless-stopped
     network_mode: "host"
-    depends_on:
-      - redis
     env_file:
       - .env
-    command: ["python", "worker.py"]
+    command: [ "python", "-m", "app.workers.xray_guard.main" ]
     volumes:
       - /var/log/xray:/var/log/xray:ro
       - /etc/localtime:/etc/localtime:ro
+    depends_on:
+      - redis
+
+
+#
+#  xray-agent-worker:
+#    build: .
+#    container_name: xray-agent-worker
+#    restart: unless-stopped
+#    network_mode: "host"
+#    depends_on:
+#      - redis
+#    env_file:
+#      - .env
+#    command: ["python", "worker.py"]
+#    volumes:
+#      - /var/log/xray:/var/log/xray:ro
+#      - /etc/localtime:/etc/localtime:ro

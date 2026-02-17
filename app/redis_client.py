@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import redis.asyncio as redis
-from app.config import settings
+
+from app.settings import settings
+
 
 # decode_responses=True => Redis возвращает str, а не bytes
 r: redis.Redis = redis.Redis.from_url(

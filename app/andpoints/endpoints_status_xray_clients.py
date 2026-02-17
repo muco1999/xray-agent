@@ -1,3 +1,5 @@
+# endpoints_status_xray_clients.py
+
 from __future__ import annotations
 
 import asyncio
@@ -8,30 +10,18 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
+from app.logger import log
+from app.settings import settings
+
 from app.auth import require_token
 
 router = APIRouter(tags=["xray-logfile"])
-
-# -----------------------------------------------------------------------------
-# ⚙️ Настройки
-# -----------------------------------------------------------------------------
-XRAY_INBOUND_TAG = os.getenv("XRAY_INBOUND_TAG", "vless-in")
-
-WINDOW_SEC = int(os.getenv("WINDOW_SEC", str(10 * 60)))
-ONLINE_WINDOW_SEC = int(os.getenv("ONLINE_WINDOW_SEC", "240"))
-DEVICES_LIMIT = int(os.getenv("DEVICES_LIMIT", "2"))
-IP_ACTIVE_TTL_SEC = int(os.getenv("IP_ACTIVE_TTL_SEC", "120"))
-
-ACCESS_LOG_PATH = os.getenv("XRAY_ACCESS_LOG", "/var/log/xray/access.log")
-
-TAIL_MAX_LINES = int(os.getenv("TAIL_MAX_LINES", "30000"))  # сколько последних строк читаем
-CACHE_TTL_SEC = float(os.getenv("CACHE_TTL_SEC", "2.0"))
-
 
 
 
@@ -86,13 +76,16 @@ _STATUS_CACHE_LOCK = asyncio.Lock()
 # -----------------------------------------------------------------------------
 # 📥 Чтение последних строк файла
 # -----------------------------------------------------------------------------
-async def read_access_log_tail(path: str, max_lines: int = TAIL_MAX_LINES) -> List[str]:
+async def read_access_log_tail(path: str, max_lines: int = settings.tail_max_lines) -> List[str]:
     """
     Быстро читаем tail файла. Для простоты и надёжности читаем целиком и берём хвост.
     На твоих объёмах это ок, но если файл станет гигабайтами — сделаем оптимизированный tail.
     """
-    if not os.path.exists(path):
-        raise FileNotFoundError(path)
+    p = Path(path)
+    if not p.exists():
+        log.warning("XRAY access log not found (guard will skip)", path=str(p))
+        return []
+
 
     # IO в threadpool
     def _read() -> List[str]:
@@ -228,35 +221,35 @@ async def get_established_443_count() -> int:
 async def build_xray_status_snapshot() -> Dict[str, Any]:
     now = time.time()
 
-    if _STATUS_CACHE.value is not None and (now - _STATUS_CACHE.ts) < CACHE_TTL_SEC:
+    if _STATUS_CACHE.value is not None and (now - _STATUS_CACHE.ts) < settings.CACHE_TTL_SEC:
         return _STATUS_CACHE.value
 
     async with _STATUS_CACHE_LOCK:
         now2 = time.time()
-        if _STATUS_CACHE.value is not None and (now2 - _STATUS_CACHE.ts) < CACHE_TTL_SEC:
+        if _STATUS_CACHE.value is not None and (now2 - _STATUS_CACHE.ts) < settings.CACHE_TTL_SEC:
             return _STATUS_CACHE.value
 
         t0 = time.time()
-        lines = await read_access_log_tail(ACCESS_LOG_PATH, max_lines=TAIL_MAX_LINES)
-        events = await run_in_threadpool(parse_xray_access_lines, lines, XRAY_INBOUND_TAG)
+        lines = await read_access_log_tail(settings.access_log_path, max_lines=settings.tail_max_lines)
+        events = await run_in_threadpool(parse_xray_access_lines, lines, settings.default_inbound_tag)
 
         # фильтруем по WINDOW_SEC (по времени события)
-        cutoff = now2 - WINDOW_SEC
+        cutoff = now2 - settings.window_sec
         events = [e for e in events if e["t"] >= cutoff]
 
-        agg = await run_in_threadpool(aggregate_status, events, now2, ONLINE_WINDOW_SEC, DEVICES_LIMIT, IP_ACTIVE_TTL_SEC)
+        agg = await run_in_threadpool(aggregate_status, events, now2, settings.online_window_sec, settings.devices_limit, settings.ip_active_ttl_sec)
         est_443 = await get_established_443_count()
 
         dur_ms = int((time.time() - t0) * 1000)
         payload = {
             "ok": True,
-            "source": f"logfile:{ACCESS_LOG_PATH}",
+            "source": f"logfile:{settings.access_log_path}",
             "ts_epoch": now2,
             "ts_iso_utc": _epoch_to_iso(now2),
-            "window_sec": WINDOW_SEC,
-            "online_window_sec": ONLINE_WINDOW_SEC,
-            "devices_limit": DEVICES_LIMIT,
-            "inbound_tag": XRAY_INBOUND_TAG,
+            "window_sec": settings.window_sec,
+            "online_window_sec": settings.online_window_sec,
+            "devices_limit": settings.devices_limit,
+            "inbound_tag": settings.default_inbound_tag,
             "connections_established_443": est_443,
             "parse_ms": dur_ms,
             **agg,
@@ -272,8 +265,8 @@ async def build_xray_status_snapshot() -> Dict[str, Any]:
 @router.get("/health/logfile", dependencies=[Depends(require_token)])
 async def health_logfile():
     try:
-        lines = await read_access_log_tail(ACCESS_LOG_PATH, max_lines=5)
-        return {"ok": True, "source": f"logfile:{ACCESS_LOG_PATH}", "tail_lines": len(lines)}
+        lines = await read_access_log_tail(settings.access_log_path, max_lines=5)
+        return {"ok": True, "source": f"logfile:{settings.access_log_path}", "tail_lines": len(lines)}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"logfile unavailable: {e}")
 
@@ -291,6 +284,6 @@ async def xray_status_clients(request: Request):
             "ok": False,
             "endpoint": "/xray/status/clients",
             "error": str(e),
-            "source": f"logfile:{ACCESS_LOG_PATH}",
+            "source": f"logfile:{settings.access_log_path}",
             "request_id": getattr(request.state, "request_id", None),
         }

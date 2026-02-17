@@ -35,7 +35,8 @@ from typing import Any, Dict
 import grpc
 from google.protobuf.json_format import MessageToDict
 
-from app.config import settings
+from app.settings import settings
+
 from app.utils import parse_hostport, is_tcp_open
 
 # Protobuf: TypedMessage / User / VLESS Account

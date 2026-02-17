@@ -1,5 +1,8 @@
 from fastapi import Header, HTTPException
-from app.config import settings
+
+from app.settings import settings
+
+
 from app.models import IssueClientRequest
 import json
 import time

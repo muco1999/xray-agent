@@ -7,7 +7,9 @@ import uuid
 
 from fastapi import HTTPException, Request
 
-from app.andpoints.logger import log
+from app.logger import log
+
+
 from app.andpoints.tools import api_error
 
 app = FastAPI(title="Xray Agent API", version="1.0.0")

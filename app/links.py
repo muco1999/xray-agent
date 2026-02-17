@@ -1,6 +1,5 @@
+from app.settings import settings
 
-
-from app.config import settings
 
 
 def build_vless_link(user_uuid: str, email: str, flow: str) -> str:
