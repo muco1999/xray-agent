@@ -221,12 +221,12 @@ async def get_established_443_count() -> int:
 async def build_xray_status_snapshot() -> Dict[str, Any]:
     now = time.time()
 
-    if _STATUS_CACHE.value is not None and (now - _STATUS_CACHE.ts) < settings.CACHE_TTL_SEC:
+    if _STATUS_CACHE.value is not None and (now - _STATUS_CACHE.ts) < settings.cache_ttl_sec:
         return _STATUS_CACHE.value
 
     async with _STATUS_CACHE_LOCK:
         now2 = time.time()
-        if _STATUS_CACHE.value is not None and (now2 - _STATUS_CACHE.ts) < settings.CACHE_TTL_SEC:
+        if _STATUS_CACHE.value is not None and (now2 - _STATUS_CACHE.ts) < settings.cache_ttl_sec:
             return _STATUS_CACHE.value
 
         t0 = time.time()
