@@ -2,26 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import signal
-import time
 import traceback
 import uuid
 from typing import Any, Dict, Tuple, Optional
 
 import httpx
 
-from app.config import settings
+from app.logger import log
+from app.settings import settings
+
+
 from app.redis_client import r
 from app.queue import QUEUE_KEY, set_job_state, clear_issue_dedupe_cache
 from app.xray import add_client, remove_client
-
-log = logging.getLogger("xray-agent-worker")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-
-
-def _now() -> int:
-    return int(time.time())
 
 
 # -----------------------------
@@ -42,7 +36,7 @@ def build_vless_link(user_uuid: str, email: str, flow: str) -> str:
 
     port = int(getattr(settings, "public_port", 443) or 443)
     fp = getattr(settings, "reality_fp", "chrome") or "chrome"
-    flow_q = f"&flow={flow}" if flow else "xtls-rprx-vision"
+    flow_q = f"&flow={flow}" if flow else "&flow=xtls-rprx-vision"
 
     return (
         f"vless://{user_uuid}@{settings.public_host}:{port}"
@@ -142,12 +136,12 @@ async def handle(job: dict) -> dict:
         inbound_tag = _require_field(payload, "inbound_tag")
         level = int(payload.get("level", 0))
         flow = payload.get("flow", "") or ""
-        return await _to_thread(add_client, user_uuid, email, inbound_tag, level, flow)
+        return await  asyncio.wait_for(_to_thread(add_client, user_uuid, email, inbound_tag, level, flow), timeout=settings.grpc_timeout_sec)
 
     if kind == "remove_client":
         email = _require_field(payload, "email")
         inbound_tag = _require_field(payload, "inbound_tag")
-        res = await _to_thread(remove_client, email, inbound_tag)
+        res = await asyncio.wait_for(_to_thread(remove_client, email, inbound_tag), timeout=settings.grpc_timeout_sec)
 
         # ✅ очистка кеша
         try:
@@ -171,7 +165,7 @@ async def handle(job: dict) -> dict:
         user_uuid = str(uuid.uuid4())
 
         # 1) gRPC add user (blocking -> thread)
-        await _to_thread(add_client, user_uuid, telegram_id, inbound_tag, level, flow)
+        await asyncio.wait_for(_to_thread(add_client, user_uuid, telegram_id, inbound_tag, level, flow), timeout=settings.grpc_timeout_sec)
 
         # 2) build link (fast)
         link = build_vless_link(user_uuid, telegram_id, flow)
@@ -179,7 +173,13 @@ async def handle(job: dict) -> dict:
         issued = {"uuid": user_uuid, "email": telegram_id, "inbound_tag": inbound_tag, "link": link}
 
         # 3) notify (async)
-        notify_info = await notify_external(issued)
+        try:
+            notify_info = await asyncio.wait_for(
+                notify_external(issued),
+                timeout=float(getattr(settings, "notify_total_timeout_sec", 20))
+            )
+        except Exception as e:
+            notify_info = {"skipped": True, "reason": f"notify_failed: {type(e).__name__}: {str(e)[:200]}"}
 
         return {"issued": issued, "notify": notify_info}
 
