@@ -7,6 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 
+from app.logger import log
+
 
 class XraySettings(BaseSettings):
     """
@@ -200,7 +202,13 @@ class XraySettings(BaseSettings):
 # ----------------------------------------------------------------------
 settings = XraySettings()
 
-bot = Bot(
-    token=settings.bot_token,
-    default=DefaultBotProperties(parse_mode="HTML"),
-)
+
+
+try:
+    bot = Bot(
+        token=settings.bot_token,
+        default=DefaultBotProperties(parse_mode="HTML"),
+    )
+except Exception:
+    log.error("No Token bot")
+    pass
