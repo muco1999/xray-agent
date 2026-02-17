@@ -22,7 +22,7 @@ services:
       - redis
     env_file:
       - .env
-    command: ["python","-m","uvicorn","app.main:app","--host","0.0.0.0","--port","${API_BIND_PORT}"]
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "${API_BIND_HOST}", "--port", "${API_BIND_PORT}"]
     volumes:
       - /var/log/xray:/var/log/xray:ro
       - /etc/localtime:/etc/localtime:ro
