@@ -1,3 +1,7 @@
+#/xray-agent/app/main.py
+
+
+
 from fastapi import FastAPI
 from app.andpoints.endpoints_status_xray_clients import router as router_status_xray_clients
 from app.andpoints.endpoints_work_clients import router as router_work_clients

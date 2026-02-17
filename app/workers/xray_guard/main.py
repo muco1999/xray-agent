@@ -1,4 +1,4 @@
-# main.py
+# /xray-agent/app/workers/xray_guard/main.py
 from __future__ import annotations
 
 import asyncio

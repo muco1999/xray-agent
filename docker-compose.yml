@@ -1,57 +1,79 @@
+version: "3.9"
+
+x-common: &common
+  image: xray-agent:latest
+  build: .
+  restart: unless-stopped
+  env_file:
+    - .env
+  volumes:
+    - /var/log/xray:/var/log/xray:ro
+    - /etc/localtime:/etc/localtime:ro
+  depends_on:
+    redis:
+      condition: service_healthy
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "50m"
+      max-file: "5"
+
 services:
   redis:
     image: redis:7-alpine
     container_name: xray-agent-redis
     restart: unless-stopped
-    network_mode: "host"
-    command:
-      [
-        "redis-server",
-        "--port", "${REDIS_PORT}",
-        "--save", "",
-        "--appendonly", "yes"
-      ]
+    command: >
+      redis-server
+      --port 6379
+      --save ""
+      --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   xray-agent-api:
-    build: .
+    <<: *common
     container_name: xray-agent-api
-    restart: unless-stopped
-    network_mode: "host"
-    depends_on:
-      - redis
-    env_file:
-      - .env
-    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "${API_BIND_HOST}", "--port", "${API_BIND_PORT}"]
-    volumes:
-      - /var/log/xray:/var/log/xray:ro
-      - /etc/localtime:/etc/localtime:ro
-
-  xray-guard:
-    container_name: xray_guard_worker
-    build: .
-    restart: unless-stopped
-    network_mode: "host"
-    env_file:
-      - .env
-    command: [ "python", "-m", "app.workers.xray_guard.main" ]
-    volumes:
-      - /var/log/xray:/var/log/xray:ro
-      - /etc/localtime:/etc/localtime:ro
-    depends_on:
-      - redis
-
-
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    ports:
+      # если API должен быть доступен снаружи:
+      - "${API_BIND_HOST:-0.0.0.0}:${API_BIND_PORT:-18000}:18000"
+      # если API должен быть только локально за nginx — поставь так:
+      # - "127.0.0.1:${API_BIND_PORT:-18000}:18000"
+    command: >
+      python -m uvicorn app.main:app
+      --host 0.0.0.0
+      --port 18000
 
   xray-agent-worker:
-    build: .
+    <<: *common
     container_name: xray-agent-worker
-    restart: unless-stopped
-    network_mode: "host"
-    depends_on:
-      - redis
-    env_file:
-      - .env
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    # ✅ твоя реальная точка входа (как в исходном compose)
     command: ["python", "worker.py"]
-    volumes:
-      - /var/log/xray:/var/log/xray:ro
-      - /etc/localtime:/etc/localtime:ro
+
+  xray-guard:
+    <<: *common
+    container_name: xray-guard
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    # ✅ твой модуль guard
+    command: ["python", "-m", "app.workers.xray_guard.main"]
+
+volumes:
+  redis-data:
