@@ -4,7 +4,14 @@ services:
     container_name: xray-agent-redis
     restart: unless-stopped
     network_mode: "host"
-    command: ["redis-server", "--port", "${REDIS_PORT}", "--save", "", "--appendonly", "no"]
+    command:
+      [
+        "redis-server",
+        "--port", "${REDIS_PORT}",
+        "--save", "",
+        "--appendonly", "yes",
+        "--replicaof", "no", "one"
+      ]
 
   xray-agent-api:
     build: .
@@ -15,7 +22,7 @@ services:
       - redis
     env_file:
       - .env
-    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "${API_BIND_HOST}", "--port", "${API_BIND_PORT}"]
+    command: ["python","-m","uvicorn","app.main:app","--host","0.0.0.0","--port","${API_BIND_PORT}"]
     volumes:
       - /var/log/xray:/var/log/xray:ro
       - /etc/localtime:/etc/localtime:ro
