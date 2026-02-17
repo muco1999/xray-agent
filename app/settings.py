@@ -205,10 +205,14 @@ settings = XraySettings()
 
 
 try:
-    bot = Bot(
-        token=settings.bot_token,
-        default=DefaultBotProperties(parse_mode="HTML"),
-    )
+
+    if settings.bot_token:
+        bot = Bot(
+            token=settings.bot_token,
+            default=DefaultBotProperties(parse_mode="HTML"),
+        )
+    else:
+        raise Exception
 except Exception:
     log.error("No Token bot")
     pass

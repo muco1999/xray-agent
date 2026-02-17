@@ -9,8 +9,7 @@ services:
         "redis-server",
         "--port", "${REDIS_PORT}",
         "--save", "",
-        "--appendonly", "yes",
-        "--replicaof", "no", "one"
+        "--appendonly", "yes"
       ]
 
   xray-agent-api:
