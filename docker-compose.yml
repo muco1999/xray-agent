@@ -2,7 +2,6 @@ version: "3.9"
 
 x-common: &common
   image: xray-agent:latest
-  build: .
   restart: unless-stopped
   env_file:
     - .env
@@ -41,38 +40,37 @@ services:
         max-size: "20m"
         max-file: "3"
 
+  # ✅ единственный билд
   xray-agent-api:
     <<: *common
+    build: .
     container_name: xray-agent-api
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
     ports:
-      # если API должен быть доступен снаружи:
       - "${API_BIND_HOST:-0.0.0.0}:${API_BIND_PORT:-18000}:18000"
-      # если API должен быть только локально за nginx — поставь так:
-      # - "127.0.0.1:${API_BIND_PORT:-18000}:18000"
     command: >
       python -m uvicorn app.main:app
       --host 0.0.0.0
       --port 18000
 
+  # ✅ только image, без build
   xray-agent-worker:
     <<: *common
     container_name: xray-agent-worker
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-    # ✅ твоя реальная точка входа (как в исходном compose)
     command: ["python", "worker.py"]
 
+  # ✅ только image, без build
   xray-guard:
     <<: *common
     container_name: xray-guard
     environment:
       REDIS_HOST: redis
       REDIS_PORT: "6379"
-    # ✅ твой модуль guard
     command: ["python", "-m", "app.workers.xray_guard.main"]
 
 volumes:
