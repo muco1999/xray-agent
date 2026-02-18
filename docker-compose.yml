@@ -35,7 +35,8 @@ services:
       timeout: 3s
       retries: 10
     ports:
-      - "redis:6379"
+      - "127.0.0.1:6379:6379"
+    # или вообще убрать ports, если Redis нужен только внутри docker-сети
     logging:
       driver: "json-file"
       options:
