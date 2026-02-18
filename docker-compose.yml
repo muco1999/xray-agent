@@ -35,7 +35,7 @@ services:
       timeout: 3s
       retries: 10
     ports:
-      - "127.0.0.1:6379:6379"
+      - "redis:6379"
     logging:
       driver: "json-file"
       options:
@@ -45,9 +45,8 @@ services:
   xray-agent-api:
     <<: *common
     build: .
-    container_name: xray-agent-api
     environment:
-      REDIS_HOST: "127.0.0.1"
+      REDIS_HOST: "redis"
       REDIS_PORT: "6379"
       XRAY_API_ADDR: "host.docker.internal:10085"
     extra_hosts:
@@ -55,31 +54,28 @@ services:
     ports:
       - "18000:18000"
     command: >
-      python -m uvicorn app.main:app
-      --host 0.0.0.0
-      --port 18000
+      python -m uvicorn app.main:app --host 0.0.0.0 --port 18000
 
   xray-agent-worker:
     <<: *common
-    container_name: xray-agent-worker
     environment:
-      REDIS_HOST: "127.0.0.1"
+      REDIS_HOST: "redis"
       REDIS_PORT: "6379"
       XRAY_API_ADDR: "host.docker.internal:10085"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: ["python", "worker.py"]
+    command: [ "python", "worker.py" ]
 
   xray-guard:
     <<: *common
-    container_name: xray-guard
     environment:
-      REDIS_HOST: "127.0.0.1"
+      REDIS_HOST: "redis"
       REDIS_PORT: "6379"
       XRAY_API_ADDR: "host.docker.internal:10085"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    command: ["python", "-m", "app.workers.xray_guard.main"]
+    command: [ "python", "-m", "app.workers.xray_guard.main" ]
+
 
 volumes:
   redis-data:

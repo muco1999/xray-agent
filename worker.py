@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import signal
 import traceback
@@ -14,7 +13,9 @@ import httpx
 
 from app.logger import log
 from app.settings import settings
-
+import asyncio
+import random
+from contextlib import suppress
 
 from app.redis_client import r
 from app.queue import QUEUE_KEY, set_job_state, clear_issue_dedupe_cache
@@ -203,6 +204,32 @@ class GracefulExit:
         await self._stop.wait()
 
 
+
+
+
+
+# Подбери исключения под твою версию redis-py:
+try:
+    from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
+except Exception:  # pragma: no cover
+    RedisConnectionError = TimeoutError  # type: ignore
+    RedisTimeoutError = TimeoutError  # type: ignore
+
+
+async def _safe_set_job_state(job_id: str, state: str, **kwargs) -> None:
+    """
+    Никогда не даём падать воркеру из-за проблем записи статуса в Redis.
+    """
+    try:
+        # ограничим время на запись статуса, чтобы не залипнуть на сетевом флапе
+        await asyncio.wait_for(set_job_state(job_id, state, **kwargs), timeout=3)
+    except asyncio.CancelledError:
+        # при остановке воркера — даём корректно завершиться
+        raise
+    except Exception as e:
+        log.error("set_job_state failed id=%s state=%s err=%r", job_id, state, e)
+
+
 async def worker_loop():
     log.info("worker started queue=%s", QUEUE_KEY)
     stopper = GracefulExit()
@@ -212,15 +239,39 @@ async def worker_loop():
         try:
             loop.add_signal_handler(sig, stopper.request_stop)
         except NotImplementedError:
-            # windows fallback
             pass
+
+    # backoff для проблем с Redis: растёт до 5с, потом сбрасывается при успехе
+    backoff = 0.1
+    backoff_max = 5.0
 
     while True:
         if stopper._stop.is_set():
             log.info("worker stopping gracefully...")
             break
 
-        item = await r.brpop(QUEUE_KEY, timeout=1)
+        # --- 1) максимально безопасное чтение из очереди ---
+        try:
+            # brpop может зависнуть при сетевом флапе — ограничим внешним таймаутом
+            item = await asyncio.wait_for(r.brpop(QUEUE_KEY, timeout=1), timeout=3)
+            backoff = 0.1  # успех -> сбрасываем backoff
+        except asyncio.TimeoutError:
+            # либо наш wait_for, либо внутренний таймаут: это нормальный "idle"
+            continue
+        except asyncio.CancelledError:
+            log.warning("worker cancelled -> stopping")
+            break
+        except (RedisConnectionError, RedisTimeoutError, OSError, ConnectionError) as e:
+            log.error("redis brpop/connect failed err=%r; backoff=%.2fs", e, backoff)
+            await asyncio.sleep(backoff + random.uniform(0, backoff * 0.2))
+            backoff = min(backoff * 2, backoff_max)
+            continue
+        except Exception as e:
+            # любой неожиданный кейс: логируем и не падаем
+            log.exception("unexpected error in brpop err=%r", e)
+            await asyncio.sleep(0.5)
+            continue
+
         if item is None:
             continue
 
@@ -237,19 +288,44 @@ async def worker_loop():
             log.error("job without id: %r", job)
             continue
 
-        await set_job_state(job_id, "running")
+        # --- 2) запись состояния: никогда не должна валить воркер ---
+        await _safe_set_job_state(job_id, "running")
         log.info("job running id=%s kind=%s", job_id, job.get("kind"))
 
         try:
+            # --- 3) handle: оставляем как есть, но ловим CancelledError отдельно ---
             res = await handle(job)
             if not isinstance(res, dict):
                 res = {"raw": res}
-            await set_job_state(job_id, "done", result=res)
+
+            await _safe_set_job_state(job_id, "done", result=res)
             log.info("job done id=%s", job_id)
+
+        except asyncio.CancelledError:
+            # при остановке — попробуем пометить, но не обязаны успеть
+            with suppress(Exception):
+                await _safe_set_job_state(job_id, "error", error={"type": "CancelledError", "msg": "worker stopping"})
+            log.warning("job cancelled id=%s -> stopping worker", job_id)
+            break
+
         except Exception as e:
             err_doc = _safe_error(e)
-            await set_job_state(job_id, "error", error=err_doc)
+            await _safe_set_job_state(job_id, "error", error=err_doc)
             log.error("job error id=%s err=%s", job_id, err_doc)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def main():
