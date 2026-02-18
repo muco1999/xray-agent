@@ -1,23 +1,29 @@
+# Версия формата docker-compose (можно удалить, т.к. compose v2 её игнорирует)
 version: "3.9"
 
+# Общий шаблон для сервисов (API, worker, guard)
+# Позволяет не дублировать image, restart, env_file и т.д.
 x-common: &common
-  image: xray-agent:latest
-  restart: unless-stopped
+  image: xray-agent:latest              # Образ приложения (API / worker / guard)
+  restart: unless-stopped               # Автоперезапуск при падении
   env_file:
-    - .env
+    - .env                              # Переменные окружения из файла
   volumes:
-    - /var/log/xray:/var/log/xray:ro
-    - /etc/localtime:/etc/localtime:ro
+    - /var/log/xray:/var/log/xray:ro    # Логи Xray (только чтение)
+    - /etc/localtime:/etc/localtime:ro  # Синхронизация времени контейнера с хостом
   depends_on:
     redis:
-      condition: service_healthy
+      condition: service_healthy        # Ждём пока Redis станет healthy
   logging:
     driver: "json-file"
     options:
-      max-size: "50m"
+      max-size: "50m"                   # Ротация логов
       max-file: "5"
 
 services:
+  # =========================
+  # Redis (очередь задач)
+  # =========================
   redis:
     image: redis:7-alpine
     container_name: xray-agent-redis
@@ -28,50 +34,88 @@ services:
       --save ""
       --appendonly yes
     volumes:
-      - redis-data:/data
+      - redis-data:/data                # Персистентные данные Redis
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:6379:6379"           # Redis доступен только локально (без внешнего доступа)
     logging:
       driver: "json-file"
       options:
         max-size: "20m"
         max-file: "3"
 
+  # =========================
+  # FastAPI сервис (HTTP API)
+  # =========================
   xray-agent-api:
     <<: *common
-    build: .
+    build: .                            # Сборка образа из текущей директории
     container_name: xray-agent-api
-    network_mode: "host"
+
+    # Если раскомментировать — контейнер будет использовать сеть хоста
+    # network_mode: "host"
+
     environment:
-      REDIS_HOST: "127.0.0.1"
+      REDIS_HOST: "127.0.0.1"           # Redis на хосте (проброшен локально)
       REDIS_PORT: "6379"
+      XRAY_API_ADDR: "host.docker.internal:10085"  # Адрес Xray API на хосте
+
+    # Доступ к хосту из контейнера (Docker gateway)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    ports:
+      - "18000:18000"                   # Публикация HTTP API наружу
+
     command: >
       python -m uvicorn app.main:app
-      --host 0.0.0.0
+      --host 0.0.0.0                    # Слушаем все интерфейсы контейнера
       --port 18000
 
+  # =========================
+  # Worker (обработка async задач)
+  # =========================
   xray-agent-worker:
     <<: *common
     container_name: xray-agent-worker
-    network_mode: "host"
+
+    # network_mode: "host"
+
     environment:
       REDIS_HOST: "127.0.0.1"
       REDIS_PORT: "6379"
+      XRAY_API_ADDR: "host.docker.internal:10085"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     command: ["python", "worker.py"]
 
+  # =========================
+  # Guard (мониторинг / контроль Xray)
+  # =========================
   xray-guard:
     <<: *common
     container_name: xray-guard
-    network_mode: "host"
+
+    # network_mode: "host"
+
     environment:
       REDIS_HOST: "127.0.0.1"
       REDIS_PORT: "6379"
+      XRAY_API_ADDR: "host.docker.internal:10085"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     command: ["python", "-m", "app.workers.xray_guard.main"]
 
+# =========================
+# Volume для Redis
+# =========================
 volumes:
   redis-data:
