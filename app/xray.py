@@ -940,6 +940,29 @@ async def _get_or_create_channel_locked() -> grpc.aio.Channel:
     return _channel
 
 
+async def _await_channel_ready(ch: grpc.aio.Channel, timeout: float) -> None:
+    """
+    Совместимое ожидание готовности grpc.aio канала.
+
+    В разных версиях grpcio:
+    - Есть ch.channel_ready() (корутина/awaitable)  ✅ чаще всего
+    - Иногда есть grpc.aio.channel_ready_future(ch) (реже)
+    """
+    # 1) Preferred: method on channel
+    if hasattr(ch, "channel_ready"):
+        await asyncio.wait_for(ch.channel_ready(), timeout=timeout)  # type: ignore[attr-defined]
+        return
+
+    # 2) Fallback: module-level future (если вдруг доступно)
+    if hasattr(grpc.aio, "channel_ready_future"):
+        fut = grpc.aio.channel_ready_future(ch)  # type: ignore[attr-defined]
+        await asyncio.wait_for(fut, timeout=timeout)
+        return
+
+    # 3) Last resort (очень редко нужно)
+    raise RuntimeError("grpc.aio channel readiness API not found (upgrade grpcio)")
+
+
 async def _ensure_channel_ready() -> None:
     """
     Проверяет готовность канала. При проблеме пересоздаёт channel/stubs и повторяет (2 попытки).
@@ -955,8 +978,7 @@ async def _ensure_channel_ready() -> None:
 
         # attempt #1
         try:
-            fut = grpc.aio.channel_ready_future(ch)
-            await asyncio.wait_for(fut, timeout=ready_timeout)
+            await _await_channel_ready(ch, ready_timeout)
             return
         except Exception as e:
             log.warning(
@@ -964,15 +986,14 @@ async def _ensure_channel_ready() -> None:
                 settings.xray_api_addr,
                 str(e)[:300],
             )
-            # reset channel+stubs and retry
             _reset_stubs_locked()
             await _close_channel_locked()
             ch = await _get_or_create_channel_locked()
 
         # attempt #2
         log.debug("xray ensure_channel_ready retry addr=%s", settings.xray_api_addr)
-        fut2 = grpc.aio.channel_ready_future(ch)
-        await asyncio.wait_for(fut2, timeout=ready_timeout)
+        await _await_channel_ready(ch, ready_timeout)
+
 
 
 async def _get_handler_stub() -> proxyman_cmd_pb2_grpc.HandlerServiceStub:
