@@ -1,6 +1,5 @@
-  GNU nano 7.2                                                                                                                                                                                                                                                                                                                                                                                                                   docker-compose.yml                                                                                                                                                                                                                                                                                                                                                                                                                             
-# Версия формата docker-compose (можно удалить, т.к. compose v2 её игнорирует)
-version: "3.9"
+                                                                                                                                                                                                                                                                                                                                                                                                         docker-compose.yml
+
 
 # Общий шаблон для сервисов (API, worker, guard)
 # Позволяет не дублировать image, restart, env_file и т.д.
