@@ -596,6 +596,7 @@ async def inbound_users_count(tag: str) -> int | None:
                 )
                 req = proxyman_cmd_pb2.GetInboundUserRequest(tag=tag, email="")
 
+
             grpc_to = _rpc_timeout_sec()
             resp = await _rpc(
                 lambda: stub.GetInboundUsersCount(req, timeout=grpc_to),

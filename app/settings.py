@@ -199,6 +199,9 @@ class XraySettings(BaseSettings):
     capacity_limit_per_inbound: int = 100 # лимит устройство на ядро xray
     capacity_limit_ttl_sec: int = 120  # Таймаут
 
+    XRAY_GRPC_ADDR: str = "host.docker.internal:10085"
+
+
 
 # ----------------------------------------------------------------------
 # singleton settings + telegram bot
