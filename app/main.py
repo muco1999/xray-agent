@@ -15,6 +15,7 @@ from app.logger import log
 
 
 from app.andpoints.tools import api_error
+from app.security.rate_limit import rate_limit_middleware
 
 app = FastAPI(title="Xray Agent API", version="1.0.0")
 
@@ -57,7 +58,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 
 
-
+app.middleware("http")(rate_limit_middleware(
+    whitelist_ips={"127.0.0.1", "194.135.33.76"}  # добавь свои ip
+))
 
 
 app.include_router(router_status_xray_clients)
