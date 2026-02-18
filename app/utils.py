@@ -36,3 +36,21 @@ def parse_hostport(addr: str) -> Tuple[str, int]:
         raise ValueError("XRAY_API_ADDR must be host:port")
     host, port_s = addr.rsplit(":", 1)
     return host, int(port_s)
+
+import math
+
+
+def format_minutes(seconds: int) -> str:
+    minutes = math.ceil(seconds / 60)
+
+    if minutes % 10 == 1 and minutes % 100 != 11:
+        word = "минута"
+    elif 2 <= minutes % 10 <= 4 and not 12 <= minutes % 100 <= 14:
+        word = "минуты"
+    else:
+        word = "минут"
+
+    return f"{minutes} {word}"
+
+
+

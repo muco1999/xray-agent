@@ -120,7 +120,7 @@ class XraySettings(BaseSettings):
     Считается по devices_estimate (из access.log).
     """
 
-    ban_grace_sec: int = Field(default=60, alias="XRAY_GUARD_BAN_GRACE_SEC")
+    ban_grace_sec: int = Field(default=15 * 60, alias="XRAY_GUARD_BAN_GRACE_SEC")
     """
     Сколько даём времени после WARN, чтобы пользователь отключил лишние устройства.
     Если не исправился → BAN (remove_client).
