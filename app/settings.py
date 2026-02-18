@@ -114,7 +114,7 @@ class XraySettings(BaseSettings):
     Период запуска проверки (сек). Например 10–30 сек.
     """
 
-    devices_limit: int = Field(default=1, alias="XRAY_GUARD_DEVICES_LIMIT")
+    devices_limit: int = Field(default=2, alias="XRAY_GUARD_DEVICES_LIMIT")
     """
     Лимит устройств на клиента.
     Считается по devices_estimate (из access.log).
