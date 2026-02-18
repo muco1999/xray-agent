@@ -596,7 +596,13 @@ async def inbound_users_count(tag: str) -> int | None:
                 )
                 req = proxyman_cmd_pb2.GetInboundUserRequest(tag=tag, email="")
 
-            resp = await _rpc(stub.GetInboundUsersCount(req, timeout=_rpc_timeout_sec()))
+            grpc_to = _rpc_timeout_sec()
+            resp = await _rpc(
+                lambda: stub.GetInboundUsersCount(req, timeout=grpc_to),
+                op="GetInboundUsersCount",
+                addr=settings.XRAY_GRPC_ADDR,
+                timeout=grpc_to + 0.5,  # небольшой запас
+            )
 
             data: Dict[str, Any] = _pb_to_dict(resp)
             raw = data.get("count", 0)
@@ -752,9 +758,53 @@ async def add_client(user_uuid: str, email: str, inbound_tag: str, level: int = 
         return {}  # unreachable
 
 
+
+import asyncio
+import time
+from typing import Awaitable, Callable, TypeVar, Optional
+
+
+T = TypeVar("T")
+
 _GRPC_INFLIGHT_LIMIT = int(getattr(settings, "xray_grpc_inflight_limit", 40))
+_GRPC_TIMEOUT_SEC = float(getattr(settings, "xray_grpc_timeout_sec", 4.0))
+
 _grpc_sem = asyncio.Semaphore(_GRPC_INFLIGHT_LIMIT)
 
-async def _rpc(coro):
+
+async def _rpc(
+    make_coro: Callable[[], Awaitable[T]],
+    *,
+    op: str,
+    addr: str,
+    timeout: Optional[float] = None,
+) -> T:
+    """
+    PROD RPC wrapper:
+    - ограничивает параллелизм через semaphore
+    - добавляет таймаут
+    - логирует start/ok/error с длительностью
+    """
+    t0 = time.perf_counter()
+    to = _GRPC_TIMEOUT_SEC if timeout is None else float(timeout)
+
     async with _grpc_sem:
-        return await coro
+        log.info('xray rpc start {"op": "%s", "addr": "%s"}', op, addr)
+        try:
+            res = await asyncio.wait_for(make_coro(), timeout=to)
+            ms = (time.perf_counter() - t0) * 1000
+            log.info('xray rpc ok {"op": "%s", "addr": "%s", "ms": %.2f}', op, addr, ms)
+            return res
+        except asyncio.TimeoutError:
+            ms = (time.perf_counter() - t0) * 1000
+            log.warning('xray rpc timeout {"op": "%s", "addr": "%s", "ms": %.2f}', op, addr, ms)
+            raise
+        except asyncio.CancelledError:
+            # важно: не глотать cancel
+            log.warning('xray rpc cancelled {"op": "%s", "addr": "%s"}', op, addr)
+            raise
+        except Exception:
+            ms = (time.perf_counter() - t0) * 1000
+            log.exception('xray rpc error {"op": "%s", "addr": "%s", "ms": %.2f}', op, addr, ms)
+            raise
+
