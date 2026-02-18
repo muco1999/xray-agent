@@ -142,7 +142,15 @@ async def _allow(request: Request, rule: RateRule, *, key_prefix: str = "rl") ->
     rate_per_ms = rule.limit.rate / 1000.0
 
     try:
-        res = await r.eval(LUA_TOKEN_BUCKET, numkeys=1, keys=[key], args=[now_ms, rate_per_ms, rule.limit.burst])
+        res = await r.eval(
+            LUA_TOKEN_BUCKET,
+            1,  # numkeys
+            key,  # KEYS[1]
+            now_ms,  # ARGV[1]
+            rate_per_ms,  # ARGV[2]
+            rule.limit.burst  # ARGV[3]
+        )
+
         allowed = int(res[0]) == 1
         retry_after_ms = int(res[1])
         remaining = float(res[2])
