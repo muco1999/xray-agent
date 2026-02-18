@@ -3,10 +3,9 @@ FastAPI entrypoint for Xray Agent API (production async).
 
 endpoints_work_clients.py
 
-
 Features:
 - async endpoints
-- sync/blocking upstream calls (grpcio) executed via threadpool
+- upstream calls are grpc.aio (non-blocking)
 - async Redis queue/status (enqueue + polling)
 - normalized error responses (no sensitive leaks)
 - request-id middleware (X-Request-ID)
@@ -20,39 +19,23 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import Query, HTTPException, Request
-from fastapi.concurrency import run_in_threadpool
+from fastapi import Query, HTTPException, Request, APIRouter, Depends
 from starlette import status
 
 from app.logger import log
-
-
 from app.andpoints.tools import api_error, _safe_upstream_detail
-from app.auth import require_token
 from app.settings import settings
-
-
 from app.models import JobEnqueueResponse, IssueClientRequest, JobStatusResponse
 
 # async queue
 from app.queue import enqueue_job, enqueue_issue_job, get_job_state, clear_issue_dedupe_cache
-from fastapi import APIRouter, Depends
-# sync grpcio adapter
-from app.xray import xray_runtime_status, remove_client, inbound_users_count, inbound_emails
 
-
-
-
+# ✅ async grpc.aio adapter
+from app.auth import require_token
+from app.xray import inbound_users_count, xray_runtime_status, inbound_emails, remove_client
 
 router = APIRouter(tags=["xray-journald"])
 
-# ----------------------------
-# App + Middleware
-# ----------------------------
-
-# ----------------------------
-# Routes
-# ----------------------------
 
 @router.get("/health/full", dependencies=[Depends(require_token)])
 async def health_full(request: Request):
@@ -65,12 +48,20 @@ async def health_full(request: Request):
       - 200 if ok
       - 503 if xray not healthy
     """
-    st = await run_in_threadpool(xray_runtime_status)
-    ok = bool(st.get("ok"))
+    try:
+        st = await xray_runtime_status()
+    except Exception as e:
+        log.exception("xray_runtime_status failed", extra={"request_id": request.state.request_id})
+        return api_error(
+            request=request,
+            http_status=503,
+            code="XRAY_UNAVAILABLE",
+            message="xray is not healthy",
+            details={"error": _safe_upstream_detail(e)},
+        )
 
+    ok = bool(st.get("ok"))
     if not ok:
-        # 503 is important for infra health checks
-        # Do not leak too much here; provide structured info.
         return api_error(
             request=request,
             http_status=503,
@@ -88,7 +79,7 @@ async def health_full(request: Request):
 @router.get("/xray/status", dependencies=[Depends(require_token)])
 async def xray_status(request: Request):
     """Fast status (still upstream). Always 200; /health/full handles 503 semantics."""
-    st = await run_in_threadpool(xray_runtime_status)
+    st = await xray_runtime_status()
     st["request_id"] = request.state.request_id
     return st
 
@@ -97,8 +88,7 @@ async def xray_status(request: Request):
 async def api_inbound_users_count(request: Request, tag: str):
     """Inbound users count (runtime state)."""
     try:
-        # IMPORTANT: make inbound_users_count return int in app/xray.py
-        result = await run_in_threadpool(inbound_users_count, tag)
+        result = await inbound_users_count(tag)
         return {"result": result, "request_id": request.state.request_id}
     except Exception as e:
         log.exception("inbound_users_count failed", extra={"tag": tag, "request_id": request.state.request_id})
@@ -109,7 +99,7 @@ async def api_inbound_users_count(request: Request, tag: str):
 async def api_inbound_emails(request: Request, tag: str):
     """Inbound user emails (runtime state)."""
     try:
-        result = await run_in_threadpool(inbound_emails, tag)
+        result = await inbound_emails(tag)
         return {"result": result, "request_id": request.state.request_id}
     except Exception as e:
         log.exception("inbound_emails failed", extra={"tag": tag, "request_id": request.state.request_id})
@@ -141,7 +131,6 @@ async def api_job_get(request: Request, job_id: str):
     if st.get("state") == "not_found":
         raise HTTPException(status_code=404, detail={"code": "JOB_NOT_FOUND", "message": "job not found", "job_id": job_id})
 
-    # если хочешь request_id в модели — добавь поле в JobStatusResponse
     return JobStatusResponse(**st)
 
 
@@ -172,9 +161,9 @@ async def api_remove_client(
             log.exception("enqueue remove_client failed", extra={"request_id": request.state.request_id})
             return api_error(request, 502, "REDIS_ERROR", "queue backend error", _safe_upstream_detail(e))
 
-    # sync path (still blocking grpcio)
+    # ✅ sync path: now non-blocking grpc.aio (still "sync" for API semantics)
     try:
-        result = await run_in_threadpool(lambda: remove_client(email=email, inbound_tag=inbound_tag))
+        result = await remove_client(email=email, inbound_tag=inbound_tag)
 
         # ✅ очищаем dedupe после удаления
         try:

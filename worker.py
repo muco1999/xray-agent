@@ -1,6 +1,4 @@
 # #/xray-agent/worker.py
-
-
 from __future__ import annotations
 
 import json
@@ -20,6 +18,9 @@ from contextlib import suppress
 from app.redis_client import r
 from app.queue import QUEUE_KEY, set_job_state, clear_issue_dedupe_cache
 from app.xray import add_client, remove_client
+
+# ✅ grpc.aio adapter (полностью async)
+# ЛОГИКА НЕ МЕНЯЕТСЯ: меняется только способ вызова (раньше blocking->thread, теперь await)
 
 
 # -----------------------------
@@ -123,16 +124,14 @@ def _safe_error(e: Exception) -> Dict[str, Any]:
     return base
 
 
-# -----------------------------
-# Blocking gRPC calls -> thread
-# -----------------------------
-async def _to_thread(fn, *args, **kwargs):
-    return await asyncio.to_thread(fn, *args, **kwargs)
-
-
 async def handle(job: dict) -> dict:
     kind = _require_field(job, "kind")
     payload = _require_field(job, "payload")
+
+    # NOTE: ЛОГИКА 1-в-1 как раньше:
+    # - add_client/remove_client/issue_client выполняются и раньше, и сейчас.
+    # - отличие: теперь вызовы gRPC не блокируют event-loop (grpc.aio),
+    #   поэтому _to_thread больше не нужен.
 
     if kind == "add_client":
         user_uuid = _require_field(payload, "uuid")
@@ -140,12 +139,22 @@ async def handle(job: dict) -> dict:
         inbound_tag = _require_field(payload, "inbound_tag")
         level = int(payload.get("level", 0))
         flow = payload.get("flow", "") or ""
-        return await  asyncio.wait_for(_to_thread(add_client, user_uuid, email, inbound_tag, level, flow), timeout=settings.grpc_timeout_sec)
+
+        # ✅ grpc.aio: await
+        return await asyncio.wait_for(
+            add_client(user_uuid, email, inbound_tag, level, flow),
+            timeout=float(getattr(settings, "grpc_timeout_sec", 10)),
+        )
 
     if kind == "remove_client":
         email = _require_field(payload, "email")
         inbound_tag = _require_field(payload, "inbound_tag")
-        res = await asyncio.wait_for(_to_thread(remove_client, email, inbound_tag), timeout=settings.grpc_timeout_sec)
+
+        # ✅ grpc.aio: await
+        res = await asyncio.wait_for(
+            remove_client(email, inbound_tag),
+            timeout=float(getattr(settings, "grpc_timeout_sec", 10)),
+        )
 
         # ✅ очистка кеша
         try:
@@ -156,9 +165,6 @@ async def handle(job: dict) -> dict:
 
         return {"removed": res, "cache_cleared": True}
 
-
-
-
     if kind == "issue_client":
         telegram_id = str(_require_field(payload, "telegram_id")).strip()
         inbound_tag = str(payload.get("inbound_tag") or settings.default_inbound_tag)
@@ -168,8 +174,11 @@ async def handle(job: dict) -> dict:
 
         user_uuid = str(uuid.uuid4())
 
-        # 1) gRPC add user (blocking -> thread)
-        await asyncio.wait_for(_to_thread(add_client, user_uuid, telegram_id, inbound_tag, level, flow), timeout=settings.grpc_timeout_sec)
+        # 1) gRPC add user (async grpc.aio)
+        await asyncio.wait_for(
+            add_client(user_uuid, telegram_id, inbound_tag, level, flow),
+            timeout=float(getattr(settings, "grpc_timeout_sec", 10)),
+        )
 
         # 2) build link (fast)
         link = build_vless_link(user_uuid, telegram_id, flow)
@@ -180,7 +189,7 @@ async def handle(job: dict) -> dict:
         try:
             notify_info = await asyncio.wait_for(
                 notify_external(issued),
-                timeout=float(getattr(settings, "notify_total_timeout_sec", 20))
+                timeout=float(getattr(settings, "notify_total_timeout_sec", 20)),
             )
         except Exception as e:
             notify_info = {"skipped": True, "reason": f"notify_failed: {type(e).__name__}: {str(e)[:200]}"}
@@ -202,10 +211,6 @@ class GracefulExit:
 
     async def wait(self):
         await self._stop.wait()
-
-
-
-
 
 
 # Подбери исключения под твою версию redis-py:
@@ -312,20 +317,6 @@ async def worker_loop():
             err_doc = _safe_error(e)
             await _safe_set_job_state(job_id, "error", error=err_doc)
             log.error("job error id=%s err=%s", job_id, err_doc)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def main():

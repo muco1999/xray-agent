@@ -6,16 +6,16 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from fastapi.concurrency import run_in_threadpool
-
 from app.andpoints.endpoints_status_xray_clients import build_xray_status_snapshot
 from app.logger import log
 from app.settings import settings, bot  # ожидается: settings + aiogram.Bot
 from app.utils import format_minutes
 from app.workers.xray_guard.analyzer import extract_violations
 from app.workers.xray_guard.queue import GuardRedis
+from app.xray import remove_client
 
-from app.xray import remove_client  # grpcio blocking
+# ✅ grpc.aio adapter (async)
+
 try:
     from app.queue import clear_issue_dedupe_cache  # если есть в агенте
 except Exception:  # pragma: no cover
@@ -72,7 +72,6 @@ async def guard_once(cfg: GuardConfig, gr: GuardRedis) -> None:
                 await gr.setex(keys.warned_at, ttl, str(now))
 
                 if tg_id:
-
                     await _send(
                         tg_id,
                         (
@@ -106,9 +105,9 @@ async def guard_once(cfg: GuardConfig, gr: GuardRedis) -> None:
                 extra={"email": email, "tag": cfg.inbound_tag, "devices": v.devices, "limit": cfg.devices_limit},
             )
 
-            # remove_client — blocking -> threadpool
+            # ✅ remove_client — теперь async grpc.aio
             try:
-                await run_in_threadpool(lambda: remove_client(email=email, inbound_tag=cfg.inbound_tag))
+                await remove_client(email=email, inbound_tag=cfg.inbound_tag)
             except Exception:
                 log.exception("remove_client failed", extra={"email": email, "tag": cfg.inbound_tag})
                 continue
@@ -188,6 +187,7 @@ def _cfg_from_settings() -> GuardConfig:
         interval_sec=int(settings.interval_sec),
         notify_timeout_sec=float(settings.notify_timeout_sec),
     )
+
 
 async def main() -> None:
     cfg = _cfg_from_settings()
