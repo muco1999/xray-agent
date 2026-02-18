@@ -10,6 +10,7 @@ from typing import Any, Dict, Tuple, Optional
 import httpx
 
 from app.logger import log
+from app.security.capacity import CapacityLimiter, CapacityPolicy
 from app.settings import settings
 import asyncio
 import random
@@ -22,6 +23,27 @@ from app.xray import add_client, remove_client
 # ✅ grpc.aio adapter (полностью async)
 # ЛОГИКА НЕ МЕНЯЕТСЯ: меняется только способ вызова (раньше blocking->thread, теперь await)
 
+# 🛡️ Capacity limiter (лимит ёмкости inbound)
+
+cap_limiter = CapacityLimiter()
+cap_policy = CapacityPolicy(
+    limit=int(getattr(settings, 'capacity_limit_per_inbound', 50) or 50),
+    ttl_sec=int(getattr(settings, 'capacity_limit_ttl_sec', 120) or 120),
+)
+
+
+# -----------------------------
+# Capacity helpers
+# -----------------------------
+async def _reserve_capacity(inbound_tag: str) -> bool:
+    ok = await cap_limiter.reserve(inbound_tag, cap_policy)
+    if not ok:
+        log.warning(
+            "capacity exceeded inbound_tag=%s limit=%s",
+            inbound_tag,
+            cap_policy.limit,
+        )
+    return ok
 
 # -----------------------------
 # Link builder (как у тебя, но без обязательных утечек)
@@ -140,11 +162,20 @@ async def handle(job: dict) -> dict:
         level = int(payload.get("level", 0))
         flow = payload.get("flow", "") or ""
 
-        # ✅ grpc.aio: await
-        return await asyncio.wait_for(
-            add_client(user_uuid, email, inbound_tag, level, flow),
-            timeout=float(getattr(settings, "grpc_timeout_sec", 10)),
-        )
+        # 🛡️ capacity reserve (anti-bomb)
+        if not await _reserve_capacity(inbound_tag):
+            return {"error": "CAPACITY_EXCEEDED", "limit": cap_policy.limit, "inbound_tag": inbound_tag}
+
+        try:
+            # ✅ grpc.aio: await
+            return await asyncio.wait_for(
+                add_client(user_uuid, email, inbound_tag, level, flow),
+                timeout=float(getattr(settings, "grpc_timeout_sec", 10)),
+            )
+        except Exception:
+            # если не удалось добавить — освобождаем слот
+            await cap_limiter.release(inbound_tag)
+            raise
 
     if kind == "remove_client":
         email = _require_field(payload, "email")
@@ -174,11 +205,19 @@ async def handle(job: dict) -> dict:
 
         user_uuid = str(uuid.uuid4())
 
+        # 🛡️ capacity reserve (anti-bomb)
+        if not await _reserve_capacity(inbound_tag):
+            return {"error": "CAPACITY_EXCEEDED", "limit": cap_policy.limit, "inbound_tag": inbound_tag}
+
         # 1) gRPC add user (async grpc.aio)
-        await asyncio.wait_for(
-            add_client(user_uuid, telegram_id, inbound_tag, level, flow),
+        try:
+            await asyncio.wait_for(
+                add_client(user_uuid, telegram_id, inbound_tag, level, flow),
             timeout=float(getattr(settings, "grpc_timeout_sec", 10)),
-        )
+            )
+        except Exception:
+            await cap_limiter.release(inbound_tag)
+            raise
 
         # 2) build link (fast)
         link = build_vless_link(user_uuid, telegram_id, flow)
@@ -204,13 +243,17 @@ async def handle(job: dict) -> dict:
 # -----------------------------
 class GracefulExit:
     def __init__(self):
-        self._stop = asyncio.Event()
+        self._event = asyncio.Event()
 
-    def request_stop(self):
-        self._stop.set()
+    def request_stop(self) -> None:
+        self._event.set()
 
-    async def wait(self):
-        await self._stop.wait()
+    async def wait(self) -> None:
+        await self._event.wait()
+
+    def is_stopping(self) -> bool:
+        return self._event.is_set()
+
 
 
 # Подбери исключения под твою версию redis-py:
@@ -251,14 +294,18 @@ async def worker_loop():
     backoff_max = 5.0
 
     while True:
-        if stopper._stop.is_set():
+        if stopper.is_stopping():
             log.info("worker stopping gracefully...")
             break
 
         # --- 1) максимально безопасное чтение из очереди ---
         try:
             # brpop может зависнуть при сетевом флапе — ограничим внешним таймаутом
-            item = await asyncio.wait_for(r.brpop(QUEUE_KEY, timeout=1), timeout=3)
+            item = await asyncio.wait_for(
+                r.brpop([QUEUE_KEY], timeout=1),
+                timeout=3,
+            )
+
             backoff = 0.1  # успех -> сбрасываем backoff
         except asyncio.TimeoutError:
             # либо наш wait_for, либо внутренний таймаут: это нормальный "idle"

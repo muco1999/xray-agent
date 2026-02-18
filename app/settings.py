@@ -196,6 +196,9 @@ class XraySettings(BaseSettings):
 
     default_flow: str = Field(default="", alias="DEFAULT_FLOW")
 
+    capacity_limit_per_inbound: int = 100 # лимит устройство на ядро xray
+    capacity_limit_ttl_sec: int = 120  # Таймаут
+
 
 # ----------------------------------------------------------------------
 # singleton settings + telegram bot
