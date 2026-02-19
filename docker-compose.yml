@@ -24,20 +24,21 @@ services:
     restart: unless-stopped
     command: >
       redis-server
-      --port 6379
-      --save ""
       --appendonly yes
+      --appendfsync everysec
+      --save ""
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --tcp-keepalive 60
+      --timeout 0
+      --loglevel notice
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD-SHELL", "redis-cli ping | grep -q PONG" ]
       interval: 5s
       timeout: 3s
       retries: 10
-
-#    ports:
-#      - "127.0.0.1:6379:6379"
-    # или вообще убрать ports, если Redis нужен только внутри docker-сети
     logging:
       driver: "json-file"
       options:
