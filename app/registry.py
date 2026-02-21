@@ -13,8 +13,8 @@ async def add_user(tag: str, email: str, uuid: str) -> None:
 
     # атомарно
     async with r.pipeline(transaction=True) as pipe:
-        pipe.sadd(key_emails, email)
-        pipe.hset(key_map, email, uuid)
+        await pipe.sadd(key_emails, email)
+        await pipe.hset(key_map, email, uuid)
         await pipe.execute()
 
 
@@ -23,8 +23,8 @@ async def remove_user(tag: str, email: str) -> None:
     key_map = UUID_BY_EMAIL_KEY.format(tag=tag)
 
     async with r.pipeline(transaction=True) as pipe:
-        pipe.srem(key_emails, email)
-        pipe.hdel(key_map, email)
+        await pipe.srem(key_emails, email)
+        await pipe.hdel(key_map, email)
         await pipe.execute()
 
 
