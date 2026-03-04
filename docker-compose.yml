@@ -1,21 +1,19 @@
 # Общий шаблон для сервисов (API, worker, guard)
-# Позволяет не дублировать image, restart, env_file и т.д.
 x-common: &common
   build: .
-  image: xray-agent:latest              # Образ приложения (API / worker / guard)
-  restart: unless-stopped               # Автоперезапуск при падении
+  restart: unless-stopped
   env_file:
-    - .env                              # Переменные окружения из файла
+    - .env
   volumes:
-    - /var/log/xray:/var/log/xray:ro    # Логи Xray (только чтение)
-    - /etc/localtime:/etc/localtime:ro  # Синхронизация времени контейнера с хостом
+    - /var/log/xray:/var/log/xray:ro
+    - /etc/localtime:/etc/localtime:ro
   depends_on:
     redis:
-      condition: service_healthy        # Ждём пока Redis станет healthy
+      condition: service_healthy
   logging:
     driver: "json-file"
     options:
-      max-size: "50m"                   # Ротация логов
+      max-size: "50m"
       max-file: "5"
 
 services:
@@ -48,11 +46,9 @@ services:
 
   xray-agent-api:
     <<: *common
-#    build: .
+    image: xray-agent-api:korea1
     environment:
       REDIS_URL: "redis://redis:6379/0"
-#      REDIS_HOST: "redis"
-#      REDIS_PORT: "6379"
       XRAY_API_ADDR: "host.docker.internal:10085"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -63,10 +59,9 @@ services:
 
   xray-agent-worker:
     <<: *common
+    image: xray-agent-worker:korea1
     environment:
       REDIS_URL: "redis://redis:6379/0"
-#      REDIS_HOST: "redis"
-#      REDIS_PORT: "6379"
       XRAY_API_ADDR: "host.docker.internal:10085"
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -74,16 +69,13 @@ services:
 
   xray-guard:
     <<: *common
+    image: xray-guard:korea1
     environment:
       REDIS_URL: "redis://redis:6379/0"
-#      REDIS_HOST: "redis"
-#      REDIS_PORT: "6379"
       XRAY_API_ADDR: "host.docker.internal:10085"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: [ "python", "-m", "app.workers.xray_guard.main" ]
 
-
 volumes:
   redis-data:
-
