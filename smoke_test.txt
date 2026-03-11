@@ -5,7 +5,9 @@
 
 
 
-
+curl -v \
+-H "Authorization: Bearer caa0fa98d27762a5306c1a94dc50fdb7a7fe4fd6da8ab0f6c9c5b77e1e236ce6" \
+http://127.0.0.1:18000/health/full
 
 
 
