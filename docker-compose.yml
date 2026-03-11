@@ -1,21 +1,19 @@
-# Общий шаблон для сервисов (API, worker, guard)
-# Позволяет не дублировать image, restart, env_file и т.д.
 x-common: &common
   build: .
-  image: xray-agent:latest              # Образ приложения (API / worker / guard)
-  restart: unless-stopped               # Автоперезапуск при падении
+  image: xray-agent:latest
+  restart: unless-stopped
   env_file:
-    - .env                              # Переменные окружения из файла
+    - .env
   volumes:
-    - /var/log/xray:/var/log/xray:ro    # Логи Xray (только чтение)
-    - /etc/localtime:/etc/localtime:ro  # Синхронизация времени контейнера с хостом
+    - /var/log/xray:/var/log/xray:ro
+    - /etc/localtime:/etc/localtime:ro
   depends_on:
     redis:
-      condition: service_healthy        # Ждём пока Redis станет healthy
+      condition: service_healthy
   logging:
     driver: "json-file"
     options:
-      max-size: "50m"                   # Ротация логов
+      max-size: "50m"
       max-file: "5"
 
 services:
@@ -35,8 +33,10 @@ services:
       --loglevel notice
     volumes:
       - redis-data:/data
+#    ports:
+#      - "127.0.0.1:6379:6379"
     healthcheck:
-      test: [ "CMD-SHELL", "redis-cli ping | grep -q PONG" ]
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -48,42 +48,31 @@ services:
 
   xray-agent-api:
     <<: *common
-#    build: .
+    container_name: xray-agent-api
+    network_mode: host
     environment:
-      REDIS_URL: "redis://redis:6379/0"
-#      REDIS_HOST: "redis"
-#      REDIS_PORT: "6379"
-      XRAY_API_ADDR: "host.docker.internal:10085"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ports:
-      - "18000:18000"
+      REDIS_URL: "redis://127.0.0.1:6379/0"
+      XRAY_API_ADDR: "127.0.0.1:10085"
     command: >
       python -m uvicorn app.main:app --host 0.0.0.0 --port 18000
 
   xray-agent-worker:
     <<: *common
+    container_name: xray-agent-worker
+    network_mode: host
     environment:
-      REDIS_URL: "redis://redis:6379/0"
-#      REDIS_HOST: "redis"
-#      REDIS_PORT: "6379"
-      XRAY_API_ADDR: "host.docker.internal:10085"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    command: [ "python", "worker.py" ]
+      REDIS_URL: "redis://127.0.0.1:6379/0"
+      XRAY_API_ADDR: "127.0.0.1:10085"
+    command: ["python", "worker.py"]
 
   xray-guard:
     <<: *common
+    container_name: xray-guard
+    network_mode: host
     environment:
-      REDIS_URL: "redis://redis:6379/0"
-#      REDIS_HOST: "redis"
-#      REDIS_PORT: "6379"
-      XRAY_API_ADDR: "host.docker.internal:10085"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    command: [ "python", "-m", "app.workers.xray_guard.main" ]
-
+      REDIS_URL: "redis://127.0.0.1:6379/0"
+      XRAY_API_ADDR: "127.0.0.1:10085"
+    command: ["python", "-m", "app.workers.xray_guard.main"]
 
 volumes:
   redis-data:
-
